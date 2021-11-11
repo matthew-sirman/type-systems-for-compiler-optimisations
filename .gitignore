@@ -1,0 +1,6 @@
+.stack-work/
+*~
+
+src/Parser/Parser.hs
+src/Parser/Lexer.hs
+src/Parser/parser-info
