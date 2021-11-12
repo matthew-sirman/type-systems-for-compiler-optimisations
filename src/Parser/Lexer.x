@@ -22,6 +22,7 @@ tokens :-
     $white+                             ;
     "--".*                              ;
     let                                 { keyword KWlet }
+    and                                 { keyword KWand }
     in                                  { keyword KWin }
     case                                { keyword KWcase }
     of                                  { keyword KWof }
@@ -75,6 +76,7 @@ type Identifier = String
 
 data Token
     = KWlet                         -- let
+    | KWand                         -- and
     | KWin                          -- in
     | KWcase                        -- case
     | KWof                          -- of

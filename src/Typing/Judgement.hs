@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell, FlexibleInstances #-}
 module Typing.Judgement where
 
-import Parser.Parser (Identifier, Pattern(..), Multiplicity(..), MultiplicityAtom(..), TypeExpr(..))
+import Parser.Parser (Identifier, Pattern(..), Multiplicity(..), MultiplicityAtom(..), TypeExpr(..), Literal(..))
 import qualified Util.Stream as Stream
 
 import Control.Monad.Except
@@ -26,6 +26,10 @@ data CheckState = CheckState
 makeLenses ''CheckState
 
 type CheckerState = State CheckState
+-- TODO: Maybe return better errors rather than just strings
+--      For example, a data type Error, listing each of the error
+--      types and taking appropriate arguments etc rather than
+--      creating a string at the exception point
 type Checker a = ExceptT String CheckerState a
 
 class Typed a where
@@ -103,19 +107,57 @@ constraintFor Linear = MConstraint True True
 constraintFor Relevant = MConstraint False True
 constraintFor Affine = MConstraint True False
 
-extend :: Bool -> Context -> MConstraint -> Pattern -> TypeExpr TypeVar -> Checker (Context, SubMap, Checker ())
-extend generaliseTypes context mul@(MConstraint affine relevant) pattern typeExpr = do
+extendGeneralise, extendNormal :: Context -> [(MConstraint, Pattern, TypeExpr TypeVar)] -> Checker (Context, SubMap, Checker ())
+extendGeneralise = extend True
+extendNormal = extend False
+
+extend :: Bool -> Context -> [(MConstraint, Pattern, TypeExpr TypeVar)] -> Checker (Context, SubMap, Checker ())
+extend generaliseTypes context extensions = do
     relevantSet <- lift $ gets (^. relevantVars)
-    (ctx, sub) <- extend' context pattern typeExpr
+    (ctx, sub) <- foldM combinator (context, emptySub) extensions
     pure (ctx, sub, createRelevantChecker relevantSet)
     where
-        extend' :: Context -> Pattern -> TypeExpr TypeVar -> Checker (Context, SubMap)
-        extend' ctx (VarPattern name) t = do
+        combinator :: (Context, SubMap) -> (MConstraint, Pattern, TypeExpr TypeVar) -> Checker (Context, SubMap)
+        combinator (ctx, sub) (mul, pattern, typeExpr) = do
+            (ctx', sub') <- extend' ctx mul pattern typeExpr
+            pure (ctx', sub' +. sub)
+
+        extend' :: Context -> MConstraint -> Pattern -> TypeExpr TypeVar -> Checker (Context, SubMap)
+        extend' ctx mul@(MConstraint affine relevant) (VarPattern name) t = do
             when affine $ modify (affineVars %~ S.insert name)
             when relevant $ modify (relevantVars %~ S.insert name)
             let ctx' = (termContext %~ M.insert name (generalise ctx t, mul)) ctx
             pure (ctx', emptySub)
-        extend' _ _ _ = throwError "Non variable patterns not yet supported."
+        extend' ctx mul (ConsPattern name patterns) t = undefined
+        extend' ctx mul (LitPattern literal) t = extendLiteral ctx mul literal t
+
+        extendLiteral :: Context -> MConstraint -> Literal Pattern -> TypeExpr TypeVar -> Checker (Context, SubMap)
+        extendLiteral ctx _ (IntLiteral _) t = do
+            s <- mgu t (TEGround "Int")
+            pure (ctx, s)
+        extendLiteral ctx _ (RealLiteral _) t = do
+            s <- mgu t (TEGround "Real")
+            pure (ctx, s)
+        extendLiteral ctx mul (ListLiteral ts) t = do
+            listType <- TEPoly <$> lift freshVar
+            listSub <- mgu t (TEList listType)
+            (ctx', _, s) <- foldM combinator (ctx, substitute listSub listType, listSub) ts
+            pure (ctx', s)
+            where
+                combinator :: (Context, TypeExpr TypeVar, SubMap) -> Pattern -> Checker (Context, TypeExpr TypeVar, SubMap)
+                combinator (elemCtx, listT, sub) pattern = do
+                    (elemCtx', s) <- extend' elemCtx mul pattern listT
+                    pure (elemCtx', substitute s listT, s +. sub)
+        extendLiteral ctx mul (TupleLiteral ts) t = do
+            (ctx', types, s) <- foldM combinator (ctx, [], emptySub) ts
+            tupleSub <- mgu t (TETuple (reverse types))
+            pure (ctx', tupleSub +. s)
+            where
+                combinator :: (Context, [TypeExpr TypeVar], SubMap) -> Pattern -> Checker (Context, [TypeExpr TypeVar], SubMap)
+                combinator (elemCtx, types, sub) pattern = do
+                    elemType <- TEPoly <$> lift freshVar
+                    (elemCtx', s) <- extend' elemCtx mul pattern elemType
+                    pure (elemCtx', substitute s elemType : types, s +. sub)
 
         createRelevantChecker :: VarSet -> Checker ()
         createRelevantChecker before = do
@@ -186,6 +228,37 @@ freshVar = do
     (var Stream.:> rest) <- gets (^. freshTypeVars)
     modify (freshTypeVars .~ rest)
     pure var
+
+mgu :: TypeExpr TypeVar -> TypeExpr TypeVar -> Checker SubMap
+mgu (TEPoly p) t = bindTypeVar p t
+mgu t (TEPoly p) = bindTypeVar p t
+mgu (TEGround g) (TEGround g') -- TODO: Maybe handle this better than just with string equality
+  | g == g' = pure emptySub
+  | otherwise = throwError $ "Cannot unify '" ++ g ++ "' with '" ++ g' ++ "'."
+mgu (TEApp con arg) (TEApp con' arg') = do
+    s0 <- mgu con con'
+    s1 <- mgu (substitute s0 arg) (substitute s0 arg')
+    pure (s1 `M.union` s0)
+mgu (TEArrow from _ to) (TEArrow from' _ to') = do -- TODO: think about arrow types?
+    s0 <- mgu from from'
+    s1 <- mgu (substitute s0 to) (substitute s0 to')
+    pure (s1 `M.union` s0)
+mgu TEUnit TEUnit = pure emptySub
+mgu (TETuple ts) (TETuple ts') = foldM combinator emptySub (zip ts ts')
+    where
+        combinator :: SubMap -> (TypeExpr TypeVar, TypeExpr TypeVar) -> Checker SubMap
+        combinator s (t, t') = M.union s <$> mgu (substitute s t) (substitute s t')
+mgu (TEList t) (TEList t') = mgu t t'
+mgu t t' = throwError $ "Unification '" ++ show t ++ " ~ " ++ show t' ++ "' failed."
+
+bindTypeVar :: TypeVar -> TypeExpr TypeVar -> Checker SubMap
+bindTypeVar var t@(TEPoly var')
+    | var == var' = pure emptySub
+    | otherwise = pure (M.singleton var t)
+bindTypeVar var typeExpr
+    | var `S.member` ftv typeExpr = throwError $ "Occurs check for '" ++ show var ++ "' failed."
+    | otherwise = pure (M.singleton var typeExpr)
+
 
 infixl 7 %/
 (%/) :: MConstraint -> MConstraint -> MConstraint

@@ -4,6 +4,8 @@ module Parser.Parser
     ( parse
     , Statement(..)
     , ValExpr(..)
+    , TypeDefinition(..)
+    , LetBinding(..)
     , Literal(..)
     , TypeExpr(..)
     , Annotated(..)
@@ -39,10 +41,11 @@ import Data.List (intersperse)
 %error { parseError }
 %monad { Alex }
 %lexer { lexer } { TokEOF }
-%expect 6
+%expect 40
 
 %token
     let                 { KWlet }
+    and                 { KWand }
     in                  { KWin }
     case                { KWcase }
     of                  { KWof }
@@ -108,42 +111,45 @@ stmts :: { [Statement] }
 stmt :: { Statement }
     : lvar ':' type ';;'                                { TypeDecl $1 $3 }
     | lvar '=' expr ';;'                                { FuncDecl $1 $3 }
-    | lvar pattern_list '=' expr ';;'                   { makeFuncDecl $1 $2 $4 }
+    | SL LN lvar pattern_list '=' expr SL ';;'          { makeFuncDecl (SL $1 $7 $2) $3 $4 $6 }
     | datatype ';;'                                     { TypeDef $1 }
 
 expr :: { ValExpr Identifier }
-    : let maybe(multiplicity) annotated(pattern) '=' expr in expr  { VELet $2 $3 $5 $7 }
-    | case maybe(multiplicity) expr of case_branches    { VECase $2 $3 (NE.reverse $5) }
-    | if maybe(multiplicity) expr then expr else expr   { makeIfCase $2 $3 $5 $7 }
-    | '\\' annotated(pattern) arrow expr                { VELambda $2 $3 $4 }
+    : SL LN let let_binding_list in expr SL             { VELet (SL $1 $7 $2) (reverse $4) $6 }
+    | SL LN case maybe(multiplicity) expr of case_branches SL { VECase (SL $1 $8 $2) $4 $5 (NE.reverse $7) }
+    | SL LN if maybe(multiplicity) expr then expr else expr SL { makeIfCase (SL $1 $10 $2) $4 $5 $7 $9 }
+    | SL LN '\\' annotated(pattern) arrow expr SL       { VELambda (SL $1 $7 $2) $4 $5 $6 }
     | term                                              { $1 }
 
 term :: { ValExpr Identifier }
-    : term '==' term                                    { VEApp (VEApp (VEVar "==") $1) $3 }
-    | term '!=' term                                    { VEApp (VEApp (VEVar "!=") $1) $3 }
-    | term '<' term                                     { VEApp (VEApp (VEVar "<") $1) $3 }
-    | term '>' term                                     { VEApp (VEApp (VEVar ">") $1) $3 }
-    | term '<=' term                                    { VEApp (VEApp (VEVar "<=") $1) $3 }
-    | term '>=' term                                    { VEApp (VEApp (VEVar ">=") $1) $3 }
-    | term '+' term                                     { VEApp (VEApp (VEVar "+") $1) $3 }
-    | term '-' term                                     { VEApp (VEApp (VEVar "-") $1) $3 }
-    | term '*' term                                     { VEApp (VEApp (VEVar "*") $1) $3 }
-    | term '/' term                                     { VEApp (VEApp (VEVar "/") $1) $3 }
-    | term '::' term                                    { VEApp (VEApp (VEVar "::") $1) $3 }
+    : SL LN term SL LN binop SL LN term SL              { VEApp (SL $7 $10 $8) (VEApp (SL $1 $4 $2) (VEVar (SL $4 $7 $5) $6) $3) $9 }
     | apps                                              { $1 }
 
 apps :: { ValExpr Identifier }
-    : apps atom                                         { VEApp $1 $2 }
+    : SL LN apps atom SL                                { VEApp (SL $1 $5 $2) $3 $4 }
     | atom                                              { $1 }
 
 atom :: { ValExpr Identifier }
     : '(' expr ')'                                      { $2 }
-    | lvar                                              { VEVar $1 }
-    | uvar                                              { VEVar $1 }
-    | int                                               { VELiteral (IntLiteral $1) }
-    | real                                              { VELiteral (RealLiteral $1) }
-    | tuple(expr)                                       { VELiteral (TupleLiteral $1) }
-    | list(expr)                                        { VELiteral (ListLiteral $1) }
+    | SL LN lvar SL                                     { VEVar (SL $1 $4 $2) $3 }
+    | SL LN uvar SL                                     { VEVar (SL $1 $4 $2) $3 }
+    | SL LN int SL                                      { VELiteral (SL $1 $4 $2) (IntLiteral $3) }
+    | SL LN real SL                                     { VELiteral (SL $1 $4 $2) (RealLiteral $3) }
+    | SL LN tuple(expr) SL                              { VELiteral (SL $1 $4 $2) (TupleLiteral $3) }
+    | SL LN list(expr) SL                               { VELiteral (SL $1 $4 $2) (ListLiteral $3) }
+
+binop :: { String }
+    : '=='                                              { "==" }
+    | '!='                                              { "!=" }
+    | '<'                                               { "<" }
+    | '>'                                               { ">" }
+    | '<='                                              { "<=" }
+    | '>='                                              { ">=" }
+    | '+'                                               { "+" }
+    | '-'                                               { "-" }
+    | '*'                                               { "*" }
+    | '/'                                               { "/" }
+    | '::'                                              { "::" }
 
 datatype :: { TypeDefinition }
     : data uvar seq(lvar) seq(mvar)                     { TypeDefinition $2 $3 $4 [] }
@@ -170,6 +176,13 @@ seq_list(p)
     : {- empty -}                                       { [] }
     | seq_list(p) p                                     { $2 : $1 }
 
+let_binding_list :: { [LetBinding Identifier] }
+    : let_binding                                       { [$1] }
+    | let_binding_list and let_binding                  { $3 : $1 }
+
+let_binding :: { LetBinding Identifier }
+    : maybe(multiplicity) annotated(pattern) '=' expr   { LetBinding $1 $2 $4 }
+
 annotated(p)
     : p                                                 { Annotated $1 Nothing }
     | p ':' type                                        { Annotated $1 (Just $3) }
@@ -195,6 +208,7 @@ pattern_atom :: { Pattern }
     : int                                               { LitPattern (IntLiteral $1) }
     | real                                              { LitPattern (RealLiteral $1) }
     | tuple(pattern)                                    { LitPattern (TupleLiteral $1) }
+    | list(pattern)                                     { LitPattern (ListLiteral $1) }
     | lvar                                              { VarPattern $1 }
     | '(' pattern ')'                                   { $2 }
 
@@ -239,7 +253,20 @@ maybe(p)
     : {- empty -}                                       { Nothing }
     | p                                                 { Just $1 }
 
+SL :: { Int }
+    : {- empty -}                                       {% getSourceLocation }
+
+LN :: { Int }
+    : {- empty -}                                       {% getLineNumber }
+
 {
+
+data SourceLocation = SL
+    { slStart :: Int
+    , slEnd :: Int
+    , slLine :: Int
+    }
+    deriving (Eq)
 
 data Statement
     = TypeDecl Identifier (TypeExpr Identifier)
@@ -252,65 +279,64 @@ instance Show Statement where
     show (FuncDecl name body) = name ++ " = " ++ show body
     show (TypeDef def) = show def
 
+-- TODO: Maybe make ValExpr a bifunctor in the identifier name and polymorphic type?
+-- TODO: Add source location tags to each constructor for better error messages
 data ValExpr poly
-    = VELet (Maybe Multiplicity) (Annotated Pattern poly) (ValExpr poly) (ValExpr poly)
-    | VECase (Maybe Multiplicity) (ValExpr poly) (NE.NonEmpty (CaseBranch poly))
-    | VEApp (ValExpr poly) (ValExpr poly)
-    | VELambda (Annotated Pattern poly) ArrowType (ValExpr poly)
-    | VEVar Identifier
-    | VELiteral (Literal (ValExpr poly))
+    = VELet SourceLocation [LetBinding poly] (ValExpr poly)
+    | VECase SourceLocation (Maybe Multiplicity) (ValExpr poly) (NE.NonEmpty (CaseBranch poly))
+    | VEApp SourceLocation (ValExpr poly) (ValExpr poly)
+    | VELambda SourceLocation (Annotated Pattern poly) ArrowType (ValExpr poly)
+    | VEVar SourceLocation Identifier
+    | VELiteral SourceLocation (Literal (ValExpr poly))
     deriving (Eq)
 
 instance Show poly => Show (ValExpr poly) where
-    show (VELet m pattern bound body) = "let " ++ showMul m ++ " " ++ show pattern ++ " = " ++ show bound ++ " in " ++ show body
+    show (VELet _ bindings body) = "let " ++ concat (intersperse " and " (map show bindings)) ++ " in " ++ show body
+    show (VECase _ m disc branches) = "case " ++ showMul m ++ " " ++ show disc ++ " of " ++ (foldMap (('\n' :) . show) branches)
         where
             showMul Nothing = ""
             showMul (Just mul) = show mul
-    show (VECase m disc branches) = "case " ++ showMul m ++ " " ++ show disc ++ " of " ++ (foldMap (('\n' :) . show) branches)
-        where
-            showMul Nothing = ""
-            showMul (Just mul) = show mul
-    show (VEApp fun arg) = case (fParen fun, aParen arg) of
+    show (VEApp _ fun arg) = case (fParen fun, aParen arg) of
                              (False, False) -> show fun ++ " " ++ show arg
                              (False, True) -> show fun ++ " (" ++ show arg ++ ")"
                              (True, False) -> "(" ++ show fun ++ ") " ++ show arg
                              (True, True) -> "(" ++ show fun ++ ") (" ++ show arg ++ ")"
         where
             fParen, aParen :: ValExpr poly -> Bool
-            fParen (VEVar _) = False
-            fParen (VEApp _ _) = False
+            fParen (VEVar _ _) = False
+            fParen (VEApp _ _ _) = False
             fParen _ = True
 
-            aParen (VEVar _) = False
-            aParen (VELiteral _) = False
+            aParen (VEVar _ _) = False
+            aParen (VELiteral _ _) = False
             aParen _ = True
-    show (VELambda pattern arrow body) = "\\" ++ show pattern ++ " " ++ show arrow ++ " " ++ show body
-    show (VEVar name) = name
-    show (VELiteral lit) = show lit
+    show (VELambda _ pattern arrow body) = "\\" ++ show pattern ++ " " ++ show arrow ++ " " ++ show body
+    show (VEVar _ name) = name
+    show (VELiteral _ lit) = show lit
 
 instance Functor ValExpr where
-    fmap f (VELet m pattern bound body) = VELet m (fmap f pattern) (fmap f bound) (fmap f body)
-    fmap f (VECase m disc bs) = VECase m (fmap f disc) (fmap (fmap f) bs)
-    fmap f (VEApp fun arg) = VEApp (fmap f fun) (fmap f arg)
-    fmap f (VELambda pattern arrow body) = VELambda (fmap f pattern) arrow (fmap f body)
-    fmap _ (VEVar v) = VEVar v
-    fmap f (VELiteral lit) = VELiteral (fmap (fmap f) lit)
+    fmap f (VELet sl bindings body) = VELet sl (fmap (fmap f) bindings) (fmap f body)
+    fmap f (VECase sl m disc bs) = VECase sl m (fmap f disc) (fmap (fmap f) bs)
+    fmap f (VEApp sl fun arg) = VEApp sl (fmap f fun) (fmap f arg)
+    fmap f (VELambda sl pattern arrow body) = VELambda sl (fmap f pattern) arrow (fmap f body)
+    fmap _ (VEVar sl v) = VEVar sl v
+    fmap f (VELiteral sl lit) = VELiteral sl (fmap (fmap f) lit)
 
 instance Foldable ValExpr where
-    foldMap f (VELet _ pattern bound body) = foldMap f pattern <> foldMap f bound <> foldMap f body
-    foldMap f (VECase _ disc bs) = foldMap f disc <> foldMap (foldMap f) bs
-    foldMap f (VEApp fun arg) = foldMap f fun <> foldMap f arg
-    foldMap f (VELambda pattern _ body) = foldMap f pattern <> foldMap f body
-    foldMap _ (VEVar _) = mempty
-    foldMap f (VELiteral lit) = foldMap (foldMap f) lit
+    foldMap f (VELet _ bindings body) = foldMap (foldMap f) bindings <> foldMap f body
+    foldMap f (VECase _ _ disc bs) = foldMap f disc <> foldMap (foldMap f) bs
+    foldMap f (VEApp _ fun arg) = foldMap f fun <> foldMap f arg
+    foldMap f (VELambda _ pattern _ body) = foldMap f pattern <> foldMap f body
+    foldMap _ (VEVar _ _) = mempty
+    foldMap f (VELiteral _ lit) = foldMap (foldMap f) lit
 
 instance Traversable ValExpr where
-    traverse f (VELet m pattern bound body) = VELet m <$> traverse f pattern <*> traverse f bound <*> traverse f body
-    traverse f (VECase m disc bs) = VECase m <$> traverse f disc <*> traverse (traverse f) bs
-    traverse f (VEApp fun arg) = VEApp <$> traverse f fun <*> traverse f arg
-    traverse f (VELambda pattern arrow body) = VELambda <$> traverse f pattern <*> pure arrow <*> traverse f body
-    traverse _ (VEVar v) = pure (VEVar v)
-    traverse f (VELiteral lit) = VELiteral <$> traverse (traverse f) lit
+    traverse f (VELet sl bindings body) = VELet sl <$> traverse (traverse f) bindings <*> traverse f body
+    traverse f (VECase sl m disc bs) = VECase sl m <$> traverse f disc <*> traverse (traverse f) bs
+    traverse f (VEApp sl fun arg) = VEApp sl <$> traverse f fun <*> traverse f arg
+    traverse f (VELambda sl pattern arrow body) = VELambda sl <$> traverse f pattern <*> pure arrow <*> traverse f body
+    traverse _ (VEVar sl v) = pure (VEVar sl v)
+    traverse f (VELiteral sl lit) = VELiteral sl <$> traverse (traverse f) lit
 
 data TypeDefinition
     = TypeDefinition Identifier [Identifier] [Identifier] [Annotated Identifier Identifier]
@@ -323,6 +349,24 @@ instance Show TypeDefinition where
             showCases :: [Annotated Identifier Identifier] -> String
             showCases [] = ""
             showCases cs = " where" ++ concatMap (("\n| " ++) . show) cs
+
+data LetBinding poly = LetBinding (Maybe Multiplicity) (Annotated Pattern poly) (ValExpr poly)
+    deriving (Eq)
+
+instance Show poly => Show (LetBinding poly) where
+    show (LetBinding m pattern expr) = showMul m ++ show pattern ++ " = " ++ show expr
+        where
+            showMul Nothing = ""
+            showMul (Just mul) = show mul ++ " "
+
+instance Functor LetBinding where
+    fmap f (LetBinding m pattern expr) = LetBinding m (fmap f pattern) (fmap f expr)
+
+instance Foldable LetBinding where
+    foldMap f (LetBinding _ pattern expr) = foldMap f pattern <> foldMap f expr
+
+instance Traversable LetBinding where
+    traverse f (LetBinding m pattern expr) = LetBinding m <$> traverse f pattern <*> traverse f expr
 
 data Literal a
     = IntLiteral Integer
@@ -499,15 +543,15 @@ instance Show MultiplicityAtom where
     show Relevant = "+"
     show Affine = "?"
 
-makeFuncDecl :: Identifier -> [Pattern] -> ValExpr Identifier -> Statement
-makeFuncDecl name patterns expr = FuncDecl name (transformLambdas patterns)
+makeFuncDecl :: SourceLocation -> Identifier -> [Pattern] -> ValExpr Identifier -> Statement
+makeFuncDecl sl name patterns expr = FuncDecl name (transformLambdas patterns)
     where
         transformLambdas :: [Pattern] -> ValExpr Identifier
         transformLambdas [] = expr
-        transformLambdas (p:ps) = VELambda (Annotated p Nothing) (Arrow Nothing) (transformLambdas ps)
+        transformLambdas (p:ps) = VELambda sl (Annotated p Nothing) (Arrow Nothing) (transformLambdas ps)
 
-makeIfCase :: Maybe Multiplicity -> ValExpr Identifier -> ValExpr Identifier -> ValExpr Identifier -> ValExpr Identifier
-makeIfCase m cond ifT ifF = VECase m cond (thenBranch NE.:| [elseBranch])
+makeIfCase :: SourceLocation -> Maybe Multiplicity -> ValExpr Identifier -> ValExpr Identifier -> ValExpr Identifier -> ValExpr Identifier
+makeIfCase sl m cond ifT ifF = VECase sl m cond (thenBranch NE.:| [elseBranch])
     where
         thenBranch = CaseBranch (VarPattern "True") ifT
         elseBranch = CaseBranch (VarPattern "False") ifF
@@ -517,9 +561,20 @@ lexer cont = do
     tok <- alexMonadScan
     cont tok
 
+parseError :: Token -> Alex a
 parseError t = do
-    ((AlexPn _ line column), a, b, c) <- alexGetInput
+    ((AlexPn _ line column), _, _, _) <- alexGetInput
     alexError ("parser error at line " ++ (show line) ++ ", column " ++ (show column) ++ ". Unexpected token " ++ (show t) ++ ".")
+
+getSourceLocation :: Alex Int
+getSourceLocation = do
+    ((AlexPn loc _ _), _, _, _) <- alexGetInput
+    pure loc
+
+getLineNumber :: Alex Int
+getLineNumber = do
+    ((AlexPn _ line _), _, _, _) <- alexGetInput
+    pure line
 
 parse :: String -> Either String [Statement]
 parse s = runAlex s alexParser
