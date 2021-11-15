@@ -8,8 +8,9 @@ module Parser.Lexer
     , alexGetInput
     , alexError
     , runAlex
-    , Identifier(..)
     ) where
+
+import Parser.AST (Identifier(..), Loc(..), SourceLocation(..))
 
 }
 
@@ -72,8 +73,6 @@ tokens :-
 
 {
 
-type Identifier = String
-
 data Token
     = KWlet                         -- let
     | KWand                         -- and
@@ -127,17 +126,17 @@ data Token
 
     | TokEOF deriving Show
 
-keyword, symbol :: Token -> AlexInput -> Int -> Alex Token
-keyword t _ _ = pure t
-symbol t _ _ = pure t
+keyword, symbol :: Token -> AlexInput -> Int -> Alex (Loc Token)
+keyword t ((AlexPn start line _), _, _, _) len = pure (L (SL start (start + len) line) t)
+symbol = keyword
 
-identifier :: (String -> Token) -> AlexInput -> Int -> Alex Token
-identifier t (_, _, _, input) len = pure $ t (take len input)
+identifier :: (Identifier -> Token) -> AlexInput -> Int -> Alex (Loc Token)
+identifier t ((AlexPn start line _), _, _, input) len = pure (L (SL start (start + len) line) (t $ I (take len input)))
 
-numeric :: forall a. Read a => (a -> Token) -> AlexInput -> Int -> Alex Token
-numeric t (_, _, _, input) len = pure $ t (read (take len input) :: a)
+numeric :: forall a. Read a => (a -> Token) -> AlexInput -> Int -> Alex (Loc Token)
+numeric t ((AlexPn start line _), _, _, input) len = pure (L (SL start (start + len) line) (t (read (take len input) :: a)))
 
-alexEOF = pure TokEOF
+alexEOF = pure (L (SL 0 0 0) TokEOF)
 
 }
 

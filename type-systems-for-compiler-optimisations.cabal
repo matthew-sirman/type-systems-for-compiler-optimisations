@@ -26,10 +26,12 @@ source-repository head
 library
   exposed-modules:
       Lib
+      Parser.AST
       Parser.Lexer
       Parser.Parser
       Typing.Checker
       Typing.Judgement
+      Typing.Types
       Util.Stream
   other-modules:
       Paths_type_systems_for_compiler_optimisations
@@ -38,6 +40,7 @@ library
   build-depends:
       array
     , base >=4.7 && <5
+    , hashable
     , lens
     , mtl
     , unordered-containers
@@ -52,6 +55,7 @@ executable type-systems-for-compiler-optimisations-exe
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , mtl
     , type-systems-for-compiler-optimisations
   default-language: Haskell2010
 

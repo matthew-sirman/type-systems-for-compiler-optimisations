@@ -29,6 +29,7 @@ library:
   - mtl
   - unordered-containers
   - lens
+  - hashable
 
 executables:
   type-systems-for-compiler-optimisations-exe:
@@ -40,6 +41,7 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - type-systems-for-compiler-optimisations
+    - mtl
 
 tests:
   type-systems-for-compiler-optimisations-test:
