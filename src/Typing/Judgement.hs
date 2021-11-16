@@ -19,6 +19,7 @@ import qualified Util.Stream as Stream
 
 import Control.Monad.Except
 import Control.Monad.State
+import Control.Monad.Reader
 import Control.Lens hiding (Context)
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
@@ -45,7 +46,25 @@ extend generaliseTypes context extensions = do
             when relevant $ modify (relevantVars %~ S.insert name)
             let ctx' = (termContext %~ M.insert name (generalise ctx t, mul)) ctx
             pure (ctx', emptySub)
-        extend' ctx mul (L loc (ConsPattern name patterns)) t = undefined
+        extend' ctx mul (L loc (ConsPattern name patterns)) t = do
+            conss <- asks (^. dataConstructors)
+            case M.lookup name conss of
+              Nothing -> typeError $ ConstructorNotInScope loc name
+              Just (TypeScheme _ args) -> checkPatterns ctx args patterns
+            where
+                checkPatterns :: Context -> Type -> [Loc Pattern] -> Checker (Context, SubMap)
+                checkPatterns _ (FunctionType {}) [] = typeError $ IncompletePattern loc name
+                checkPatterns ctx _ [] = pure (ctx, emptySub)
+                checkPatterns ctx' (FunctionType from arrow to) (p:ps) = do
+                    (ctx'', s0) <- extend' ctx' (constraint arrow) p from 
+                    (ctx''', s1) <- checkPatterns ctx'' to ps
+                    pure (ctx''', s1 +. s0)
+                    where
+                        constraint :: Arrow -> MConstraint
+                        constraint (Arrow (Just (MAtom m))) = constraintFor m %* mul
+                        constraint (Arrow Nothing) = constraintFor Normal %* mul
+                checkPatterns ctx' t _ = do
+                    typeError $ TooManyArguments loc name
         extend' ctx mul (L loc (LitPattern literal)) t = extendLiteral ctx mul loc literal t
 
         extendLiteral :: Context -> MConstraint -> SourceLocation -> Literal (Loc Pattern) -> Type -> Checker (Context, SubMap)
@@ -110,15 +129,30 @@ tighten :: Context -> MConstraint -> Context
 tighten ctx constraint = (termContext %~ M.map tightenElem) ctx
     where
         tightenElem :: (TypeScheme, MConstraint) -> (TypeScheme, MConstraint)
-        tightenElem (scheme, vConstraint) = (scheme, vConstraint %/ constraint)
+        tightenElem (scheme, vConstraint) = (scheme, vConstraint %* constraint)
 
 contextLookup :: Context -> SourceLocation -> Identifier -> Checker Type
-contextLookup ctx loc name = case M.lookup name (ctx ^. termContext) of
-                               Nothing -> typeError $ VariableNotInScope loc name
-                               Just (scheme, constraint) -> do
-                                   checkAndConsume constraint
-                                   instantiate scheme
+contextLookup ctx loc name = do
+    staticResult <- checkStaticContext
+    case staticResult of
+      Just t -> pure t
+      Nothing ->
+        case M.lookup name (ctx ^. termContext) of
+          Nothing -> typeError $ VariableNotInScope loc name
+          Just (scheme, constraint) -> do
+              checkAndConsume constraint
+              instantiate scheme
     where
+        checkStaticContext :: Checker (Maybe Type)
+        checkStaticContext = do
+            funcs <- asks (^. defaultFunctions)
+            conss <- asks (^. dataConstructors)
+            case M.lookup name funcs of
+              Just ts -> Just <$> instantiate ts
+              Nothing -> case M.lookup name conss of
+                           Just ts -> Just <$> instantiate ts
+                           Nothing -> pure Nothing
+
         checkAndConsume :: MConstraint -> Checker ()
         checkAndConsume (MConstraint allowedAffine allowedRelevant) = do
             -- If the variable we are trying to use is in the zero set, it cannot be consumed.
@@ -270,9 +304,9 @@ constraintFor Linear = MConstraint True True
 constraintFor Relevant = MConstraint False True
 constraintFor Affine = MConstraint True False
 
-infixl 7 %/
-(%/) :: MConstraint -> MConstraint -> MConstraint
-(MConstraint a r) %/ (MConstraint a' r') = MConstraint (a && a') (r && r')
+infixl 7 %*
+(%*) :: MConstraint -> MConstraint -> MConstraint
+(MConstraint a r) %* (MConstraint a' r') = MConstraint (a && a') (r && r')
 
 infixl 5 +.
 (+.) :: SubMap -> SubMap -> SubMap

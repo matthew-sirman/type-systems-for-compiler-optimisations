@@ -6,8 +6,11 @@ import Typing.Types
 import Typing.Judgement
 import qualified Util.Stream as Stream
 
+import Builtin.Builtin
+
 import Control.Monad.Except
 import Control.Monad.State
+import Control.Monad.Reader
 import Control.Lens hiding (Context)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isNothing)
@@ -18,7 +21,7 @@ import qualified Data.HashSet as S
 -- type RemapperState a = StateT (M.HashMap Identifier TypeVar) CheckerState a
 
 typecheck :: StaticContext -> Loc ValExpr -> Either (TypeError, TypeVarMap) Type
-typecheck expr = runReader (evalState (runExceptT checker) emptyCheckState)
+typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheckState) staticCtx
     where
         checker :: Checker Type
         checker = fst <$> typecheck' emptyContext expr
@@ -372,7 +375,7 @@ typecheckLiteral ctx (TupleLiteral exprs) = do
             pure (t : types, s' +. s, substitute s' ctx')
 
 testEverything :: String -> IO ()
-testEverything s = case typecheck (fromRight (test_parseExpr s)) of
+testEverything s = case typecheck defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (showError s tvm e)
                      Right t -> print t
     where

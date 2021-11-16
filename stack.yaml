@@ -35,7 +35,9 @@ packages:
 # These entries can reference officially published versions as well as
 # forks / in-progress versions pinned to a git hash. For example:
 #
-# extra-deps:
+allow-newer: true
+extra-deps:
+- disjoint-containers-0.2.4@sha256:8eb77b55d221f6b29f7f82a822839c7e13d63788dac92da7f32859ee0f91cf1e,1331
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a

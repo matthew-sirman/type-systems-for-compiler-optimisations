@@ -4,6 +4,7 @@ import Parser.Parser
 import Parser.AST
 import Typing.Checker
 import Typing.Types
+import Builtin.Builtin
 
 import System.Environment
 import Control.Monad.Except
@@ -33,7 +34,7 @@ parseSource source = case test_parseExpr source of
 runTypeChecker :: String -> Process ()
 runTypeChecker source = do
     ve <- parseSource source
-    case typecheck ve of
+    case typecheck defaultBuiltins ve of
       Left (e, tvm) -> throwError (showError source tvm e)
       Right t -> lift $ print t
 

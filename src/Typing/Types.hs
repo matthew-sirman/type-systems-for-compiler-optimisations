@@ -15,6 +15,7 @@ module Typing.Types
     , MultiplicityScheme, quantifiedMVars, baseMul
     , MConstraint(..)
     , Context(..), termContext, mulContext, typeNameContext
+    , StaticContext(..), defaultFunctions, dataConstructors, dataTypes
     , Typed(..)
 
     , emptyContext
@@ -24,7 +25,7 @@ module Typing.Types
     , typeError
     , showError
 
-    , intType, realType, unitType, listTypeCon
+    , intType, realType, unitType, boolType, listTypeCon
     ) where
 
 import Parser.AST
@@ -52,6 +53,9 @@ data TypeError
     | ContextRelevancyViolation SourceLocation Identifier
     | ContextAffinityViolation SourceLocation Identifier
     | VariableNotInScope SourceLocation Identifier
+    | ConstructorNotInScope SourceLocation Identifier
+    | IncompletePattern SourceLocation Identifier
+    | TooManyArguments SourceLocation Identifier
     | GroundUnificationFailure SourceLocation Identifier Identifier
     | UnificationFailure SourceLocation Type Type
     | OccursCheckFailure SourceLocation TypeVar Type
@@ -87,9 +91,6 @@ data CheckState = CheckState
 
 makeLenses ''CheckState
 
-type CheckerState = State CheckState
-type Checker a = ExceptT (TypeError, TypeVarMap) (ReaderT StaticContext CheckerState) a
-
 class Typed a where
     ftv :: a -> S.HashSet TypeVar
     substitute :: SubMap -> a -> a
@@ -115,6 +116,7 @@ data TypeScheme = TypeScheme
     { _quantifiedTVars :: [TypeVar]
     , _baseType :: Type
     }
+    deriving Show
 
 makeLenses ''TypeScheme
 
@@ -144,10 +146,13 @@ makeLenses ''Context
 data StaticContext = StaticContext
     { _defaultFunctions :: M.HashMap Identifier TypeScheme
     , _dataConstructors :: M.HashMap Identifier TypeScheme
-    , _types :: S.HashSet Identifier
+    , _dataTypes :: S.HashSet Identifier
     }
 
 makeLenses ''StaticContext
+
+type CheckerState = StateT CheckState (Reader StaticContext)
+type Checker a = ExceptT (TypeError, TypeVarMap) CheckerState a
 
 instance Typed Context where
     ftv (Context termCtx _ _) = ftv (fst <$> M.elems termCtx)
@@ -170,10 +175,11 @@ typeError err = do
     varMap <- gets (^. varAssignments)
     throwError (err, varMap)
 
-intType, realType, unitType, listTypeCon :: Type
+intType, realType, unitType, boolType, listTypeCon :: Type
 intType = Ground (I "Int")
 realType = Ground (I "Real")
 unitType = Ground (I "()")
+boolType = Ground (I "Bool")
 listTypeCon = Ground (I "[]")
 
 showError :: String -> TypeVarMap -> TypeError -> String
@@ -187,6 +193,12 @@ showError text tvm (ContextAffinityViolation loc name) =
     showContext text loc ++ "Variable \"" ++ show name ++ "\" with affine constraint used in a context which may violate affinity."
 showError text tvm (VariableNotInScope loc name) =
     showContext text loc ++ "Variable \"" ++ show name ++ "\" not in scope."
+showError text tvm (ConstructorNotInScope loc name) =
+    showContext text loc ++ "Data constructor \"" ++ show name ++ "\" not in scope."
+showError text tvm (IncompletePattern loc name) =
+    showContext text loc ++ "Data constructor \"" ++ show name ++ "\" has an incomplete pattern."
+showError text tvm (TooManyArguments loc name) =
+    showContext text loc ++ "Data constructor \"" ++ show name ++ "\" given too many arguments."
 showError text tvm (GroundUnificationFailure loc name name') =
     showContext text loc ++ "Unification of ground types \"" ++ show name ++ " ~ " ++ show name' ++ "\" failed."
 showError text tvm (UnificationFailure loc t t') =

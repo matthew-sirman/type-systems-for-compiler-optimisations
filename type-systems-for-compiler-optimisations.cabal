@@ -25,7 +25,7 @@ source-repository head
 
 library
   exposed-modules:
-      Lib
+      Builtin.Builtin
       Parser.AST
       Parser.Lexer
       Parser.Parser
@@ -40,6 +40,7 @@ library
   build-depends:
       array
     , base >=4.7 && <5
+    , disjoint-containers
     , hashable
     , lens
     , mtl
