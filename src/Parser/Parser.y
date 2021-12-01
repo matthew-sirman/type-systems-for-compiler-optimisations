@@ -230,12 +230,12 @@ arrow :: { Loc ArrowExpr }
     | '-c'                                              { loc (makeArrow Affine $1) $1 $> }
     | '->' multiplicity                                 { loc (ArrowExpr (Just $2)) $1 $> }
 
-multiplicity :: { Loc Multiplicity }
-    : mvar                                              { loc (MPoly (rawId $1)) $1 $> }
-    | '*'                                               { loc (MAtom Normal) $1 $> }
-    | '!'                                               { loc (MAtom Linear) $1 $> }
-    | '+'                                               { loc (MAtom Relevant) $1 $> }
-    | '?'                                               { loc (MAtom Affine) $1 $> }
+multiplicity :: { Loc MultiplicityExpr }
+    : mvar                                              { loc (MEPoly (rawId $1)) $1 $> }
+    | '*'                                               { loc (MEAtom Normal) $1 $> }
+    | '!'                                               { loc (MEAtom Linear) $1 $> }
+    | '+'                                               { loc (MEAtom Relevant) $1 $> }
+    | '?'                                               { loc (MEAtom Affine) $1 $> }
 
 maybe(p)
     : {- empty -}                                       { Nothing }
@@ -279,7 +279,7 @@ makeTypeDef start name pVars mVars cs
         def :: Loc a -> Loc TypeDefinition
         def end = loc (TypeDefinition name pVars mVars cs) start end
 
-makeIfCase :: Maybe (Loc Multiplicity) -> Loc ValExpr -> Loc ValExpr -> Loc ValExpr -> ValExpr
+makeIfCase :: Maybe (Loc MultiplicityExpr) -> Loc ValExpr -> Loc ValExpr -> Loc ValExpr -> ValExpr
 makeIfCase m cond ifT@(L trueLoc _) ifF@(L falseLoc _) = VECase m cond (thenBranch NE.:| [elseBranch])
     where
         thenBranch = L trueLoc (CaseBranch (L trueLoc (VarPattern (I "True"))) ifT)
@@ -288,12 +288,12 @@ makeIfCase m cond ifT@(L trueLoc _) ifF@(L falseLoc _) = VECase m cond (thenBran
 makeBinOp :: Loc ValExpr -> Loc ValExpr -> Loc ValExpr -> ValExpr
 makeBinOp lhs op rhs = VEApp (loc (VEApp op lhs) lhs op) rhs
 
-makeLetBinding :: Maybe (Loc Multiplicity) -> Loc (Annotated Pattern) -> Loc ValExpr -> Loc LetBinding
+makeLetBinding :: Maybe (Loc MultiplicityExpr) -> Loc (Annotated Pattern) -> Loc ValExpr -> Loc LetBinding
 makeLetBinding Nothing pattern expr = loc (LetBinding Nothing pattern expr) pattern expr
 makeLetBinding m@(Just start) pattern expr = loc (LetBinding m pattern expr) start expr
 
 makeArrow :: MultiplicityAtom -> Loc a -> ArrowExpr
-makeArrow atom (L sl _) = ArrowExpr (Just (L sl (MAtom atom)))
+makeArrow atom (L sl _) = ArrowExpr (Just (L sl (MEAtom atom)))
 
 lexer :: (Loc Token -> Alex a) -> Alex a
 lexer cont = do

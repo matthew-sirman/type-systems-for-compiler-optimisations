@@ -28,6 +28,7 @@ library:
   - array
   - mtl
   - unordered-containers
+  - containers
   - disjoint-containers
   - lens
   - hashable

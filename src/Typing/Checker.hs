@@ -6,7 +6,8 @@ import Typing.Types
 import Typing.Judgement
 import qualified Util.Stream as Stream
 
-import Builtin.Builtin
+import qualified Builtin.Builtin as B
+import qualified Builtin.Types as B
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -18,13 +19,16 @@ import Data.Functor (($>))
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 
+-- TODO: REMOVE
+import qualified Data.DisjointSet as DS
+
 -- type RemapperState a = StateT (M.HashMap Identifier TypeVar) CheckerState a
 
 typecheck :: StaticContext -> Loc ValExpr -> Either (TypeError, TypeVarMap) Type
 typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheckState) staticCtx
     where
         checker :: Checker Type
-        checker = fst <$> typecheck' emptyContext expr
+        checker = typecheck' emptyContext expr >>= typeRepresentative
 
 -- typecheck expr = flip evalState emptyCheckState $ do
 --     -- We construct a new state monad within this evalState call. Then, we
@@ -140,72 +144,61 @@ typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheck
 --                         build (n:ns) = n Stream.:> build ns
 
 -- Typecheck and infer the type of an expression under a given variable context.
-typecheck' :: Context -> Loc ValExpr -> Checker (Type, SubMap)
+typecheck' :: Context -> Loc ValExpr -> Checker Type
 
 typecheck' ctx (L _ (VELet bindings body)) = do
     -- Check each let binding and get a list of their constriants, patterns and types,
     -- along with a substitution for all the learned information from checking them
-    (ctx', extensions, s0) <- checkLetBindings
+    extensions <- checkLetBindings
     -- Extend the context with the generalised types we inferred
-    (ctx'', s2, checkRelevant) <- extendGeneralise ctx' extensions
+    (ctx', checkRelevant) <- extendGeneralise ctx extensions
     -- Typecheck the body under the extended context
-    (bodyType, s1) <- typecheck' ctx'' body
+    bodyType <- typecheck' ctx' body
     -- Check that any relevant variables introduced are now consumed
     checkRelevant
-    pure (substitute s2 bodyType, s1 +. s0)
+    pure bodyType
     where
-        checkLetBindings :: Checker (Context, [(MConstraint, Loc Pattern, Type)], SubMap)
+        checkLetBindings :: Checker [(Multiplicity, Loc Pattern, Type)]
         checkLetBindings = do
             let projectAnnotation (LetBinding _ ann _) = syntax ann
                 annotatedPatterns = map (projectAnnotation . syntax) bindings
                 patterns = map (\(Annotated pattern _) -> pattern) annotatedPatterns
 
             -- We create new type variables for each of the annotated patterns
-            initialBoundTypes <- mapM annotationToType annotatedPatterns
+            (initialBoundTypes, ctx) <- annotationsToTypes ctx annotatedPatterns
             -- We extend the context with the new type variables in order to type check the
             -- bound expressions
             --
             -- We always extend with normal multiplicity for recursive function bindings.
-            (ctx', extendSub, _) <- extendNormal ctx (zip3 (repeat $ constraintFor Normal) patterns initialBoundTypes)
-            -- Next, we fold over checking each binding to get a (reversed) list of the types we inferred,
-            -- and a substitution we "learned" from checking each binding.
-            foldM checkBinding (ctx', [], emptySub) (zip (map syntax bindings) (map (substitute extendSub) initialBoundTypes))
+            (ctx', _) <- extendNormal ctx (zip3 (repeat $ MAtom Normal) patterns initialBoundTypes)
+            -- Next, we map over checking each binding to get a list of the types we inferred
+            mapM (checkBinding ctx') (zip (map syntax bindings) initialBoundTypes)
 
-        checkBinding :: (Context, [(MConstraint, Loc Pattern, Type)], SubMap)
-                     -> (LetBinding, Type)
-                     -> Checker (Context, [(MConstraint, Loc Pattern, Type)], SubMap)
-        checkBinding (ctx', types, sub) (binding, initialBoundType) = do
-            let (LetBinding m (L loc (Annotated pattern patType)) bound) = binding
-            letM <- getMul loc m
-            let constraint = constraintFor letM
+        checkBinding :: Context -> (LetBinding, Type) -> Checker (Multiplicity, Loc Pattern, Type)
+        checkBinding ctx' (binding, initialBoundType) = do
+            let (LetBinding m (L _ (Annotated pattern patType)) bound) = binding
+            (letMul, ctx') <- annotationToMultiplicity ctx' m
             -- We need to tighten the context constraints for the bound expression - these must be 
             -- extended to account for the the fact that the newly bound variable could have a 
             -- weaker multiplicity than one of the values it depends on - this cannot be allowed,
             -- as we could then indirectly violate the multiplicity constraint. So, we tighten
             -- the context to prevent stronger values from being used incorrectly
-            (boundType, s0) <- typecheck' (tighten ctx' constraint) bound
-            -- subBoundType <- mgu (location bound) boundType (substitute s0 initialBoundType)
+            boundType <- typecheck' (tighten ctx' letMul) bound
+            unify (location bound) initialBoundType Equivalent boundType
             -- Check that if there was an explicit annotation, that the type we inferred unifies with it.
             -- If there was an annotation, and we have inferred a type which proves the annotation is
             -- appropriate, then we should just use the annotation
-            -- !!!! entailSub <- checkTypeEntails (substitute subBoundType boundType) patType
-            entailSub <- checkTypeEntails ctx' boundType patType
-            -- Update the context for the new substitution for checking the next binding
+            checkTypeEntails ctx' boundType patType
             -- Add the constraint pattern type triple for this binding
-            -- Update the substitution
-            pure (substitute (entailSub +. s0) ctx', (constraint, pattern, substitute entailSub boundType) : types, entailSub +. s0 +. sub)
+            pure (letMul, pattern, boundType)
 
-            where
-                getMul :: SourceLocation -> Maybe (Loc Multiplicity) -> Checker MultiplicityAtom
-                getMul _ (Just (L _ (MAtom letM))) = pure letM
-                getMul loc _ = typeError $ GenericError (Just loc) "Let binding must be explicitly annotated with a concrete multiplicity (for now)."
-
-typecheck' ctx (L _ (VECase (Just (L _ (MAtom caseM))) disc branches)) = do
+typecheck' ctx (L _ (VECase mul disc branches)) = do
+    (caseMul, ctx) <- annotationToMultiplicity ctx mul
     -- Check the discriminator
     -- We need to tighten constraints for the discriminator expression - these are extended to account
     -- for the fact that we will destruct the discriminator `caseM` times - so if `caseM` is
     -- a weaker multiplicity than the current constraint, we must tighten.
-    (discType, s0) <- typecheck' (tighten ctx (constraintFor caseM)) disc
+    discType <- typecheck' (tighten ctx caseMul) disc
 
     -- Get the variable constraint sets. These must be folded through the branches to check
     -- how each branch uses them.
@@ -215,43 +208,35 @@ typecheck' ctx (L _ (VECase (Just (L _ (MAtom caseM))) disc branches)) = do
     -- will reset to this state. This allows us to have the same variable set when entering
     -- each branch of the case: modifications in one branch will not persist to other branches,
     -- as only one branch is ever executed.
-    let resetter = lift $ modify ( (affineVars .~ inA) 
-                                 . (relevantVars .~ inR)
-                                 . (zeroVars .~ inZ) )
+    let resetter = modify ( (affineVars .~ inA)
+                          . (relevantVars .~ inR)
+                          . (zeroVars .~ inZ) )
 
     -- We also want to fold through a result type for the branches. Initially, we have no idea
     -- what type the branches will result in, so we just create a fresh polymorphic variable.
     -- The idea is that after each branch is typed, we will use the most general unifier between
     -- the current best type, and the type we have just seen for this branch. Then, we will feed
     -- this newly unified type onto the next branch.
-    initialBranchType <- freshVarType
-    (_, exprType, _, sOut, (outA, outR, outZ)) <- foldM (compareBranches resetter)
-                                                        (discType, initialBranchType, substitute s0 ctx, s0, vSets)
-                                                        branches
-    lift $ modify ( (affineVars .~ outA)
+    initialBranchType <- freshPolyType
+    (outA, outR, outZ) <- foldM (compareBranches resetter caseMul discType initialBranchType) vSets branches
+    modify ( (affineVars .~ outA)
                   . (relevantVars .~ outR)
                   . (zeroVars .~ outZ) )
-    pure (exprType, sOut)
+    typeRepresentative initialBranchType
     where
-        compareBranches :: Checker ()
-                        -> (Type, Type, Context, SubMap, (VarSet, VarSet, VarSet))
+        compareBranches :: Checker () -> Multiplicity -> Type -> Type -> (VarSet, VarSet, VarSet)
                         -> Loc CaseBranch
-                        -> Checker (Type, Type, Context, SubMap, (VarSet, VarSet, VarSet))
+                        -> Checker (VarSet, VarSet, VarSet)
 
-        compareBranches resetVarSets (discType, branchType, bCtx, inSub, (inA, inR, inZ)) branch = do
+        compareBranches resetVarSets caseMul discType branchType (inA, inR, inZ) branch = do
             -- At the start of the branch, we reset the variable states
             resetVarSets
             -- Then, we actually check the branch. This returns firstly the type we infer from the
             -- branch
-            -- Next, we get a unifier for extending the context for this branch. This is because the
-            -- discriminator may have resulted in a type which we learn more about when we actually
-            -- decompose it.
-            -- Finally, we return a context substitution for the branch inference. This is what we
-            -- learned about any type variables through typing the branch.
-            (branchType', s0) <- checkBranch bCtx discType (syntax branch)
+            branchType' <- checkBranch caseMul discType (syntax branch)
             -- Now we unify our updated view of the previously expected branch type with the newly
             -- inferred branch type.
-            s1 <- mgu (location branch) (substitute s0 branchType) branchType'
+            unify (location branch) branchType LessThan branchType'
             -- Next, we handle the affine relevant and zero set tracking.
             (bA, bR, bZ) <- getVarSets
 
@@ -283,101 +268,86 @@ typecheck' ctx (L _ (VECase (Just (L _ (MAtom caseM))) disc branches)) = do
                 outR = inR `S.union` bR
                 outZ = inZ `S.union` bZ
 
-            pure ( substitute s0 discType
-                 , substitute s1 branchType'
-                 , substitute s0 bCtx
-                 , s0 +. inSub
-                 , (outA, outR, outZ))
+            pure (outA, outR, outZ)
 
-        checkBranch :: Context -> Type -> CaseBranch -> Checker (Type, SubMap)
-
-        checkBranch bCtx discType (CaseBranch pattern body) = do
+        checkBranch :: Multiplicity -> Type -> CaseBranch -> Checker Type
+        checkBranch caseMul discType (CaseBranch pattern body) = do
             -- Extend the context with the pattern under the constraint provided by the case statement
-            (bCtx', discSub, checkRelevant) <- extendNormal bCtx [(constraintFor caseM, pattern, discType)]
+            (ctx', checkRelevant) <- extendNormal ctx [(caseMul, pattern, discType)]
             -- Check the branch itself
-            (branchType, branchSub) <- typecheck' (substitute discSub bCtx') body
+            branchType <- typecheck' ctx' body
             -- Check that any relevant variables introduced within the branch itself have been consumed
             checkRelevant
-            pure (branchType, branchSub +. discSub)
+            pure branchType
 
         getVarSets :: Checker (VarSet, VarSet, VarSet)
         getVarSets = do
-            preBranchState <- lift get
-            let inA = preBranchState ^. affineVars
-                inR = preBranchState ^. relevantVars
-                inZ = preBranchState ^. zeroVars
+            stateContext <- get
+            let inA = stateContext ^. affineVars
+                inR = stateContext ^. relevantVars
+                inZ = stateContext ^. zeroVars
             pure (inA, inR, inZ)
 
-typecheck' _ (L loc (VECase {})) =
-    typeError $ GenericError (Just loc) "Case expression must be explicitly annotated with a concrete multiplicity (for now)."
-
 typecheck' ctx (L _ (VEApp fun arg)) = do
-    (funType, s0) <- typecheck' ctx fun 
-    -- (from, arrowMul, to) <- unpack funType
+    funType <- typecheck' ctx fun 
+    funMul <- unpackFunMul funType
+    argType <- typecheck' (tighten ctx funMul) arg
 
-    (argType, s1) <- typecheck' (substitute s0 (tighten ctx (constraintFor (unpackMul funType)))) arg
-
-    returnType <- freshVarType
-    s2 <- mgu (location fun) (substitute s1 funType) (FunctionType argType (Arrow Nothing) returnType)
-
-    pure (substitute s2 returnType, s2 +. s1 +. s0)
-
+    returnType <- freshPolyType
+    unify (location fun) funType Equivalent (FunctionType argType (Arrow funMul) returnType)
+    pure returnType
     where
-        -- unpack :: TypeExpr TypeVar -> Checker (TypeExpr TypeVar, MultiplicityAtom, TypeExpr TypeVar)
-        -- unpack (TEArrow from (Arrow (Just (MAtom m))) to) = pure (from, m, to)
-        -- unpack _ = throwError "Function in application must have function type with explicit concrete multiplicity."
-        unpackMul :: Type -> MultiplicityAtom
-        unpackMul (FunctionType _ (Arrow (Just (MAtom m))) _) = m
-        unpackMul _ = Normal
+        unpackFunMul :: Type -> Checker Multiplicity
+        unpackFunMul (FunctionType _ (Arrow m) _) = pure m
+        unpackFunMul _ = freshPolyMul
 
-typecheck' ctx (L _ (VELambda (L _ ann@(Annotated pattern patType)) (L _ arrow@(ArrowExpr (Just (L _ (MAtom arrowMul))))) body)) = do
-    argType <- annotationToType ann
-    (ctx', argSub, checkRelevant) <- extendNormal ctx [(constraintFor arrowMul, pattern, argType)]
-    (bodyType, s) <- typecheck' ctx' body
-    let argType' = substitute (s +. argSub) argType
-    entailSub <- checkTypeEntails ctx argType' patType
+typecheck' ctx (L _ (VELambda (L _ ann@(Annotated pattern patType)) (L _ (ArrowExpr arrow)) body)) = do
+    (argType, ctx) <- annotationToType ctx ann
+    (arrowMul, ctx) <- annotationToMultiplicity ctx arrow
+    (ctx', checkRelevant) <- extendNormal ctx [(arrowMul, pattern, argType)]
+    bodyType <- typecheck' ctx' body
+    checkTypeEntails ctx argType patType
     checkRelevant
-    arrow' <- createArrowFor arrow
-    pure (FunctionType (substitute entailSub argType') arrow' (substitute entailSub bodyType), s)
+    pure (FunctionType argType (Arrow arrowMul) bodyType)
 
-typecheck' _ (L loc (VELambda {})) =
-    typeError $ GenericError (Just loc) "Lambda expression must be explicitly annotated with a concrete multiplicity (for now)."
-
-typecheck' ctx (L loc (VEVar x)) = do
-    varType <- contextLookup ctx loc x
-    pure (varType, emptySub)
+typecheck' ctx (L loc (VEVar x)) = contextLookup ctx loc x
 
 typecheck' ctx (L _ (VELiteral lit)) = typecheckLiteral ctx lit
 
-typecheckLiteral :: Context -> Literal (Loc ValExpr) -> Checker (Type, SubMap)
-typecheckLiteral _ (IntLiteral _) = pure (intType, emptySub)
+typecheckLiteral :: Context -> Literal (Loc ValExpr) -> Checker Type
+typecheckLiteral _ (IntLiteral _) = pure B.intType
 
-typecheckLiteral _ (RealLiteral _) = pure (realType, emptySub)
+typecheckLiteral _ (RealLiteral _) = pure B.realType
 
 typecheckLiteral ctx (ListLiteral es) = do
-    initialListType <- freshVarType
-    (listType, sub, _) <- foldM combinator (initialListType, emptySub, ctx) es
-    pure (TypeApp listTypeCon listType, sub)
+    initialListType <- freshPolyType
+    mapM_ (unifyElements initialListType) es
+    pure (TypeApp B.listTypeCon initialListType)
     where
-        combinator :: (Type, SubMap, Context) -> Loc ValExpr -> Checker (Type, SubMap, Context)
-        combinator (t, s, ctx') expr = do
-            (t', s0) <- typecheck' ctx' expr
-            s1 <- mgu (location expr) (substitute s0 t) t'
-            pure (substitute s1 t', s1 +. s, substitute s0 ctx')
+        unifyElements :: Type -> Loc ValExpr -> Checker ()
+        unifyElements t expr = do
+            t' <- typecheck' ctx expr
+            unify (location expr) t' LessThan t
 
 typecheckLiteral ctx (TupleLiteral exprs) = do
-    (types, sub, _) <- foldM combinator ([], emptySub, ctx) exprs
-    pure (TupleType (reverse types), sub)
-    where
-        combinator :: ([Type], SubMap, Context) -> Loc ValExpr -> Checker ([Type], SubMap, Context)
-        combinator (types, s, ctx') expr = do
-            (t, s') <- typecheck' ctx' expr
-            pure (t : types, s' +. s, substitute s' ctx')
+    types <- mapM (typecheck' ctx) exprs
+    pure (TupleType types)
 
 testEverything :: String -> IO ()
-testEverything s = case typecheck defaultBuiltins (fromRight (test_parseExpr s)) of
+testEverything s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (showError s tvm e)
-                     Right t -> print t
+                     Right t -> putStrLn (showType M.empty t)
+    where
+        fromRight (Right x) = x
+
+testEverything2 :: String -> IO ()
+testEverything2 s = do
+    let res = runReader (runStateT (runExceptT (typecheck' emptyContext (fromRight $ test_parseExpr s))) emptyCheckState) B.defaultBuiltins
+    case res of
+      (Left (e, tvm), _) -> putStrLn (showError s tvm e)
+      (Right t, CheckState { _typeEquivalences = te }) -> do
+          putStrLn (showType M.empty t)
+          putStrLn (DS.pretty te)
     where
         fromRight (Right x) = x
 

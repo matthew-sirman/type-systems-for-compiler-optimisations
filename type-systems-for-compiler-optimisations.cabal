@@ -26,12 +26,19 @@ source-repository head
 library
   exposed-modules:
       Builtin.Builtin
+      Builtin.Types
+      Compiler.Compiler
+      IR.BasicBlock
+      IR.Function
+      IR.Instructions
+      IR.Program
       Parser.AST
       Parser.Lexer
       Parser.Parser
       Typing.Checker
       Typing.Judgement
       Typing.Types
+      Util.BoundedPoset
       Util.Stream
   other-modules:
       Paths_type_systems_for_compiler_optimisations
@@ -40,6 +47,7 @@ library
   build-depends:
       array
     , base >=4.7 && <5
+    , containers
     , disjoint-containers
     , hashable
     , lens

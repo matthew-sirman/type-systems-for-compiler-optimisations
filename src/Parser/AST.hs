@@ -10,13 +10,15 @@ module Parser.AST
     , CaseBranch(..)
     , Pattern(..)
     , ArrowExpr(..)
-    , Multiplicity(..)
+    , MultiplicityExpr(..)
     , MultiplicityAtom(..)
     , SourceLocation(..)
     , Loc(..)
 
     , Identifier(..)
     ) where
+
+import qualified Util.BoundedPoset as B
 
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
@@ -51,7 +53,7 @@ instance Functor Loc where
 ----------------------------------
 
 newtype Identifier = I String
-    deriving (Eq, Generic)
+    deriving (Eq, Ord, Generic)
 
 instance Hashable Identifier
 
@@ -63,7 +65,7 @@ data Statement
 
 data ValExpr
     = VELet [Loc LetBinding] (Loc ValExpr)
-    | VECase (Maybe (Loc Multiplicity)) (Loc ValExpr) (NE.NonEmpty (Loc CaseBranch))
+    | VECase (Maybe (Loc MultiplicityExpr)) (Loc ValExpr) (NE.NonEmpty (Loc CaseBranch))
     | VEApp (Loc ValExpr) (Loc ValExpr)
     | VELambda (Loc (Annotated Pattern)) (Loc ArrowExpr) (Loc ValExpr)
     | VEVar Identifier
@@ -74,7 +76,7 @@ data TypeDefinition
     = TypeDefinition (Loc Identifier) [Loc Identifier] [Loc Identifier] [Loc (Annotated Identifier)]
     deriving (Eq)
 
-data LetBinding = LetBinding (Maybe (Loc Multiplicity)) (Loc (Annotated Pattern)) (Loc ValExpr)
+data LetBinding = LetBinding (Maybe (Loc MultiplicityExpr)) (Loc (Annotated Pattern)) (Loc ValExpr)
     deriving (Eq)
 
 data Literal a
@@ -106,24 +108,21 @@ data Pattern
     | LitPattern (Literal (Loc Pattern))
     deriving (Eq)
 
-newtype ArrowExpr = ArrowExpr (Maybe (Loc Multiplicity))
+newtype ArrowExpr = ArrowExpr (Maybe (Loc MultiplicityExpr))
     deriving (Eq)
 
-data Multiplicity
-    = MPoly Identifier
-    | MAtom MultiplicityAtom
-    -- | MSub Multiplicity
-    -- | MDiv Multiplicity Multiplicity
-    -- | MZero
-    deriving (Eq)
+data MultiplicityExpr
+    = MEPoly Identifier
+    | MEAtom MultiplicityAtom
+    | MEProd MultiplicityExpr MultiplicityExpr
+    deriving (Eq, Ord)
 
 data MultiplicityAtom
     = Normal
     | Linear
     | Relevant
     | Affine
-    deriving (Eq)
-
+    deriving (Eq, Ord, Generic)
 
 ----------------------------------------
 --        Identifier Instances        --
@@ -254,17 +253,18 @@ instance Show Pattern where
 
 instance Show ArrowExpr where
     show (ArrowExpr Nothing) = "->"
-    show (ArrowExpr (Just (L _ (MAtom Normal)))) = "->"
-    show (ArrowExpr (Just (L _ (MAtom Linear)))) = "-o"
+    show (ArrowExpr (Just (L _ (MEAtom Normal)))) = "->"
+    show (ArrowExpr (Just (L _ (MEAtom Linear)))) = "-o"
     show (ArrowExpr (Just m)) = "-> " ++ show m
 
 ------------------------------------------
 --        Multiplicity Instances        --
 ------------------------------------------
 
-instance Show Multiplicity where
-    show (MPoly name) = show name
-    show (MAtom atom) = show atom
+instance Show MultiplicityExpr where
+    show (MEPoly name) = show name
+    show (MEAtom atom) = show atom
+    show (MEProd lhs rhs) = show lhs ++ " * " ++ show rhs
 
 ----------------------------------------------
 --        MultiplicityAtom Instances        --
@@ -275,4 +275,6 @@ instance Show MultiplicityAtom where
     show Linear = "!"
     show Relevant = "+"
     show Affine = "?"
+
+instance Hashable MultiplicityAtom
 
