@@ -35,6 +35,7 @@ library
       Parser.AST
       Parser.Lexer
       Parser.Parser
+      Preprocessor.Preprocessor
       Typing.Checker
       Typing.Judgement
       Typing.Types

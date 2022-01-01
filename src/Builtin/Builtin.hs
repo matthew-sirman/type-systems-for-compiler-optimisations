@@ -26,6 +26,7 @@ functions = M.fromList
     , funcSub
     , funcMul
     , funcDiv
+    , funcUndefined
     ]
 
 constructors :: M.HashMap Identifier TypeScheme
@@ -40,7 +41,7 @@ types :: S.HashSet Identifier
 types = S.empty
 
 funcEquals, funcNotEquals, funcGreaterThan, funcLessThan, funcGreaterEqual, funcLessEqual,
-    funcAdd, funcSub, funcMul, funcDiv :: BuiltinFunction
+    funcAdd, funcSub, funcMul, funcDiv, funcUndefined :: BuiltinFunction
 funcEquals = (I "==", TypeScheme (S.singleton 0) S.empty (FunctionType a linear (FunctionType a linear boolType)))
 funcNotEquals = (I "!=", TypeScheme (S.singleton 0) S.empty (FunctionType a linear (FunctionType a linear boolType)))
 funcGreaterThan = (I ">", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear boolType)))
@@ -51,6 +52,7 @@ funcAdd = (I "+", TypeScheme S.empty S.empty (FunctionType intType linear (Funct
 funcSub = (I "-", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
 funcMul = (I "*", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
 funcDiv = (I "/", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
+funcUndefined = (I "undefined", TypeScheme (S.singleton 0) S.empty (Poly 0))
 
 consTrue, consFalse, consListNil, consListCons :: BuiltinFunction
 consTrue = (I "True", normalCons [] boolType)

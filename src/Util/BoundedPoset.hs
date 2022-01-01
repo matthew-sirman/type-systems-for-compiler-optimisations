@@ -12,6 +12,7 @@ module Util.BoundedPoset
      , leq
      , equivalent
      , maybeLeq
+     , unlimited
      ) where
 
 import Data.Hashable (Hashable)
@@ -201,4 +202,15 @@ maybeLeq v c poset = case M.lookup v (poset ^. lessThan) of
                                  case unconj v of
                                    Just (l, r) -> maybeLeq l c poset || maybeLeq r c poset
                                    Nothing -> True
+
+unlimited :: (Eq a, Hashable a, Eq core, FixedCorePoset core a) => a -> BoundedPoset core a -> Bool
+unlimited v set = case M.lookup v (set ^. lessThan) of
+                    Just elem -> (elem ^. _1.bound == bottom) && (elem ^. _2.bound == top)
+                    Nothing ->
+                        case unembed v of
+                          Just _ -> False
+                          Nothing ->
+                              case unconj v of
+                                Just (l, r) -> unlimited l set && unlimited r set
+                                Nothing -> True
 

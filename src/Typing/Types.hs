@@ -2,25 +2,45 @@
 module Typing.Types 
     ( TypeError(..)
     , VarSet
+    , TermVar
     , TypeVar
     , MultiplicityVar , TypeVarMap
     , Type(..)
     , Multiplicity(..)
     , Arrow(..)
-    , CheckState(..)
+    , CheckStackFrame(..)
+    , termNameContext
+    , addedTermNames
+    , typeNameContext
+    , mulNameContext
+
+    , CheckVarFrame(..)
     , affineVars
     , relevantVars
     , zeroVars
+
+    , CheckState(..)
+    , stackFrame
+    , varFrame 
+    , freshTermVars
     , freshTypeVars
     , typeEquivalences
     , freshMulVars
+    , mulEquivalences
     , mulRelation
-    , varAssignments
+    , termVarAssignments
+    , typeVarAssignments
+    , mulVarAssignments
+
+    , pushStackFrame
+    , popStackFrame
+    , pushVarFrame
+    , popVarFrame
 
     , CheckerState
     , Checker
     , TypeScheme(..), quantifiedTVars, quantifiedMVars, baseType
-    , Context(..), termContext, typeNameContext, mulNameContext
+    , Context(..), termContext
     , StaticContext(..), defaultFunctions, dataConstructors, dataTypes
     , Typed(..)
 
@@ -34,6 +54,7 @@ module Typing.Types
 import Parser.AST
     ( Identifier(..)
     , SourceLocation(..)
+    , Loc(..)
     , MultiplicityAtom(..)
     )
 
@@ -60,6 +81,7 @@ data TypeError
     | AffinityViolation SourceLocation Identifier
     | ContextRelevancyViolation SourceLocation Identifier
     | ContextAffinityViolation SourceLocation Identifier
+    | DuplicateVariableDefinition SourceLocation Identifier
     | VariableNotInScope SourceLocation Identifier
     | ConstructorNotInScope SourceLocation Identifier
     | IncompletePattern SourceLocation Identifier
@@ -70,10 +92,12 @@ data TypeError
     | MAtomUnificationFailure SourceLocation MultiplicityAtom MultiplicityAtom
     | MOrderingViolation SourceLocation Multiplicity Multiplicity
     | EntailmentFailure SourceLocation Type
+    | EntailmentMultiAssign SourceLocation TypeVar
     | GenericError (Maybe SourceLocation) Message
     | TypeErrorList [TypeError]
 
-type VarSet = S.HashSet Identifier
+type VarSet = S.HashSet TermVar
+type TermVar = Integer
 type TypeVar = Integer
 type MultiplicityVar = Integer
 type TypeVarMap = M.HashMap TypeVar Identifier
@@ -128,19 +152,42 @@ instance Show Arrow where
     show (Arrow (MAtom Linear)) = "-o"
     show (Arrow m) = "-> " ++ show m
 
+data CheckStackFrame = CheckStackFrame
+    { _termNameContext :: M.HashMap Identifier TermVar
+    , _addedTermNames :: S.HashSet (Loc Identifier)
+    , _typeNameContext :: M.HashMap Identifier Type
+    , _mulNameContext :: M.HashMap Identifier Multiplicity
+    }
+
+makeLenses ''CheckStackFrame
+
+data CheckVarFrame = CheckVarFrame
+    { _affineVars           :: VarSet
+    , _relevantVars         :: VarSet
+    , _zeroVars             :: VarSet
+    }
+
+makeLenses ''CheckVarFrame
+
 data CheckState = CheckState
-    { _affineVars       :: VarSet
-    , _relevantVars     :: VarSet
-    , _zeroVars         :: VarSet
+    { _stackFrame           :: CheckStackFrame
+    , _checkStack           :: [CheckStackFrame]
 
-    , _freshTypeVars    :: Stream.Stream TypeVar
-    , _typeEquivalences :: DS.DisjointSet Type
+    , _varFrame             :: CheckVarFrame
+    , _varStack             :: [CheckVarFrame]
 
-    , _freshMulVars     :: Stream.Stream MultiplicityVar
-    , _mulRelation      :: P.BoundedPoset MultiplicityAtom Multiplicity
+    , _freshTermVars        :: Stream.Stream TermVar
 
-    , _mulAssignments   :: M.HashMap MultiplicityVar Multiplicity
-    , _varAssignments   :: TypeVarMap
+    , _freshTypeVars        :: Stream.Stream TypeVar
+    , _typeEquivalences     :: DS.DisjointSet Type
+
+    , _freshMulVars         :: Stream.Stream MultiplicityVar
+    , _mulEquivalences      :: DS.DisjointSet Multiplicity
+    , _mulRelation          :: P.BoundedPoset MultiplicityAtom Multiplicity
+
+    , _termVarAssignments   :: M.HashMap TermVar Identifier
+    , _typeVarAssignments   :: TypeVarMap
+    , _mulVarAssignments    :: M.HashMap MultiplicityVar Identifier
     }
 
 makeLenses ''CheckState
@@ -190,10 +237,8 @@ instance Show TypeScheme where
         unwords (S.toList (S.map show vars) <> S.toList (S.map show mvars)) ++
         ". " ++ show base
 
-data Context = Context 
+newtype Context = Context 
     { _termContext :: M.HashMap Identifier (TypeScheme, Multiplicity)
-    , _typeNameContext :: M.HashMap Identifier Type
-    , _mulNameContext :: M.HashMap Identifier Multiplicity
     }
 
 makeLenses ''Context
@@ -210,28 +255,77 @@ type CheckerState = StateT CheckState (Reader StaticContext)
 type Checker a = ExceptT (TypeError, TypeVarMap) CheckerState a
 
 instance Typed Context where
-    ftv (Context termCtx _ _) = ftv (fst <$> M.elems termCtx)
-    fuv (Context termCtx _ _) = fuv (fst <$> M.elems termCtx)
+    ftv (Context termCtx) = ftv (fst <$> M.elems termCtx)
+    fuv (Context termCtx) = fuv (fst <$> M.elems termCtx)
 
 emptyContext :: Context
-emptyContext = Context M.empty M.empty M.empty
+emptyContext = Context
+    { _termContext = M.empty
+    }
 
 emptyCheckState :: CheckState
 emptyCheckState = CheckState 
+    { _stackFrame = emptyStackFrame
+    , _checkStack = []
+    , _varFrame = emptyVarFrame
+    , _varStack = []
+    , _freshTermVars = Stream.iterate (+ 1) 0
+    , _freshTypeVars = Stream.iterate (+ 1) 0
+    , _freshMulVars = Stream.iterate (+ 1) 0
+    , _mulEquivalences = DS.empty
+    , _mulRelation = P.empty
+    , _typeEquivalences = DS.empty
+    , _termVarAssignments = M.empty
+    , _mulVarAssignments = M.empty
+    , _typeVarAssignments = M.empty
+    }
+
+emptyStackFrame :: CheckStackFrame
+emptyStackFrame = CheckStackFrame
+    { _termNameContext = M.empty
+    , _addedTermNames = S.empty
+    , _typeNameContext = M.empty
+    , _mulNameContext = M.empty
+    }
+
+emptyVarFrame :: CheckVarFrame
+emptyVarFrame = CheckVarFrame
     { _affineVars = S.empty
     , _relevantVars = S.empty
     , _zeroVars = S.empty
-    , _freshTypeVars = Stream.iterate (+ 1) 0
-    , _freshMulVars = Stream.iterate (+ 1) 0
-    , _mulRelation = P.empty
-    , _typeEquivalences = DS.empty
-    , _mulAssignments = M.empty
-    , _varAssignments = M.empty
     }
+
+pushStackFrame :: Checker ()
+pushStackFrame = do
+    top <- gets (^. stackFrame)
+    modify ( (checkStack %~ (top:))
+           . (stackFrame .~ (addedTermNames .~ S.empty) top))
+
+popStackFrame :: Checker ()
+popStackFrame = do
+    stack <- gets (^. checkStack)
+    case stack of
+      -- This case should never happen
+      [] -> pure ()
+      (top:rest) -> modify ( (checkStack .~ rest)
+                           . (stackFrame .~ top))
+
+pushVarFrame :: Checker ()
+pushVarFrame = do
+    top <- gets (^. varFrame)
+    modify (varStack %~ (top:))
+
+popVarFrame :: Checker ()
+popVarFrame = do
+    stack <- gets (^. varStack)
+    case stack of
+      [] -> pure ()
+      (top:rest) -> modify ( (varStack .~ rest)
+                           . (varFrame .~ top))
 
 typeError :: TypeError -> Checker a
 typeError err = do
-    varMap <- gets (^. varAssignments)
+    varMap <- gets (^. typeVarAssignments)
     throwError (err, varMap)
 
 showError :: String -> TypeVarMap -> TypeError -> String
@@ -267,7 +361,9 @@ showError text tvm (MAtomUnificationFailure loc a a') =
 showError text tvm (MOrderingViolation loc m m') =
     showContext text loc ++ "Failed to add \"" ++ show m ++ " <= " ++ show m' ++ "\" to contraint graph."
 showError text tvm (EntailmentFailure loc t) =
-    showContext text loc ++ "Type \"" ++ showType tvm t ++ "\" does not entail the annotated type."
+    showContext text loc ++ "Inferred type cannot entail annotated type \"" ++ showType tvm t ++ "\"."
+showError text tvm (EntailmentMultiAssign loc tv) =
+    showContext text loc ++ "Type variable '" ++ show tv ++ "' was assigned to multiple types in entailment."
 showError _ _ (GenericError Nothing message) =
     "<no location>: " ++ message
 showError text _ (GenericError (Just loc) message) =

@@ -21,6 +21,7 @@ import qualified Data.HashSet as S
 
 -- TODO: REMOVE
 import qualified Data.DisjointSet as DS
+import Typing.Types (CheckVarFrame(CheckVarFrame))
 
 -- type RemapperState a = StateT (M.HashMap Identifier TypeVar) CheckerState a
 
@@ -151,11 +152,13 @@ typecheck' ctx (L _ (VELet bindings body)) = do
     -- along with a substitution for all the learned information from checking them
     extensions <- checkLetBindings
     -- Extend the context with the generalised types we inferred
-    (ctx', checkRelevant) <- extendGeneralise ctx extensions
+    pushStackFrame
+    ctx' <- extendGeneralise ctx extensions
     -- Typecheck the body under the extended context
     bodyType <- typecheck' ctx' body
     -- Check that any relevant variables introduced are now consumed
     checkRelevant
+    popStackFrame
     pure bodyType
     where
         checkLetBindings :: Checker [(Multiplicity, Loc Pattern, Type)]
@@ -165,26 +168,31 @@ typecheck' ctx (L _ (VELet bindings body)) = do
                 patterns = map (\(Annotated pattern _) -> pattern) annotatedPatterns
 
             -- We create new type variables for each of the annotated patterns
-            (initialBoundTypes, ctx) <- annotationsToTypes ctx annotatedPatterns
+            initialBoundTypes <- mapM annotationToType annotatedPatterns
+            pushStackFrame
             -- We extend the context with the new type variables in order to type check the
             -- bound expressions
             --
             -- We always extend with normal multiplicity for recursive function bindings.
-            (ctx', _) <- extendNormal ctx (zip3 (repeat $ MAtom Normal) patterns initialBoundTypes)
+            ctx' <- extendNormal ctx (zip3 (repeat $ MAtom Normal) patterns initialBoundTypes)
             -- Next, we map over checking each binding to get a list of the types we inferred
-            mapM (checkBinding ctx') (zip (map syntax bindings) initialBoundTypes)
+            result <- mapM (checkBinding ctx') (zip (map syntax bindings) initialBoundTypes)
+            popStackFrame
+            pure result
 
         checkBinding :: Context -> (LetBinding, Type) -> Checker (Multiplicity, Loc Pattern, Type)
         checkBinding ctx' (binding, initialBoundType) = do
             let (LetBinding m (L _ (Annotated pattern patType)) bound) = binding
-            (letMul, ctx') <- annotationToMultiplicity ctx' m
+            letMul <- annotationToMultiplicity m
             -- We need to tighten the context constraints for the bound expression - these must be 
             -- extended to account for the the fact that the newly bound variable could have a 
             -- weaker multiplicity than one of the values it depends on - this cannot be allowed,
             -- as we could then indirectly violate the multiplicity constraint. So, we tighten
             -- the context to prevent stronger values from being used incorrectly
+            pushStackFrame
             boundType <- typecheck' (tighten ctx' letMul) bound
-            unify (location bound) initialBoundType Equivalent boundType
+            popStackFrame
+            unify (location bound) initialBoundType boundType
             -- Check that if there was an explicit annotation, that the type we inferred unifies with it.
             -- If there was an annotation, and we have inferred a type which proves the annotation is
             -- appropriate, then we should just use the annotation
@@ -193,7 +201,7 @@ typecheck' ctx (L _ (VELet bindings body)) = do
             pure (letMul, pattern, boundType)
 
 typecheck' ctx (L _ (VECase mul disc branches)) = do
-    (caseMul, ctx) <- annotationToMultiplicity ctx mul
+    caseMul <- annotationToMultiplicity mul
     -- Check the discriminator
     -- We need to tighten constraints for the discriminator expression - these are extended to account
     -- for the fact that we will destruct the discriminator `caseM` times - so if `caseM` is
@@ -202,91 +210,74 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
 
     -- Get the variable constraint sets. These must be folded through the branches to check
     -- how each branch uses them.
-    vSets@(inA, inR, inZ) <- getVarSets
-    -- Here, we create a state monad "resetter" designed to reset only these variable sets to
-    -- what they are at this point in execution. When this resetter is used later, the variables
-    -- will reset to this state. This allows us to have the same variable set when entering
-    -- each branch of the case: modifications in one branch will not persist to other branches,
-    -- as only one branch is ever executed.
-    let resetter = modify ( (affineVars .~ inA)
-                          . (relevantVars .~ inR)
-                          . (zeroVars .~ inZ) )
-
+    vSets <- gets (^. varFrame)
     -- We also want to fold through a result type for the branches. Initially, we have no idea
     -- what type the branches will result in, so we just create a fresh polymorphic variable.
     -- The idea is that after each branch is typed, we will use the most general unifier between
     -- the current best type, and the type we have just seen for this branch. Then, we will feed
     -- this newly unified type onto the next branch.
     initialBranchType <- freshPolyType
-    (outA, outR, outZ) <- foldM (compareBranches resetter caseMul discType initialBranchType) vSets branches
-    modify ( (affineVars .~ outA)
-                  . (relevantVars .~ outR)
-                  . (zeroVars .~ outZ) )
+    outVSets <- foldM (compareBranches caseMul discType initialBranchType) vSets branches
+    modify (varFrame .~ outVSets)
     typeRepresentative initialBranchType
     where
-        compareBranches :: Checker () -> Multiplicity -> Type -> Type -> (VarSet, VarSet, VarSet)
+        compareBranches :: Multiplicity -> Type -> Type -> CheckVarFrame
                         -> Loc CaseBranch
-                        -> Checker (VarSet, VarSet, VarSet)
+                        -> Checker CheckVarFrame
 
-        compareBranches resetVarSets caseMul discType branchType (inA, inR, inZ) branch = do
-            -- At the start of the branch, we reset the variable states
-            resetVarSets
+        compareBranches caseMul discType branchType inVSets branch = do
             -- Then, we actually check the branch. This returns firstly the type we infer from the
             -- branch
+            pushVarFrame
             branchType' <- checkBranch caseMul discType (syntax branch)
+            branchVSets <- gets (^. varFrame)
+            popVarFrame
             -- Now we unify our updated view of the previously expected branch type with the newly
             -- inferred branch type.
-            unify (location branch) branchType LessThan branchType'
-            -- Next, we handle the affine relevant and zero set tracking.
-            (bA, bR, bZ) <- getVarSets
+            unify (location branch) branchType branchType'
 
-            -- We can see here that we fold each set through with either an intersection or union.
-            --
-            -- Affine
-            --  The affine variables are intersected with one another. This is to say that if an affine
-            -- variable is used on any case branch, then it must not be used after the case expression.
-            -- This is essential as we cannot know which branch is taken at typing, so we cannot use it
-            -- anywhere else in the program. So, by taking the intersection of the remaining affine
-            -- variables, we keep only those which were not used in any branch.
-            --
-            -- Relevant
-            --  Here, we take the union. This is because we may only drop the relevant constraint for a
-            -- variable if it is used in every branch, otherwise we cannot be sure that it was used. So,
-            -- the only way a relevant variable remains is if it was not used in every branch.
-            --
-            -- Zero
-            --  Again, we take the union. One way to think of this is that the union of affine and zero
-            -- variables should be invariant. Another way to think about it is that if a variable is moved
-            -- to the zero set among any branch, then it cannot be used in the rest of the program, as that
-            -- branch may be decided. So, we must place it in the zero branch.
-            --
-            -- It is interesting to note that if a linear variable is used in some branches but not others,
-            -- then it will end up in the zero set and the relevant set. However, this is guaranteed to fail:
-            -- the relevant set says we must use the variable to not experience an error, but the zero set
-            -- says we cannot use it. But this is exactly the property we want for linear variables.
-            let outA = inA `S.intersection` bA
-                outR = inR `S.union` bR
-                outZ = inZ `S.union` bZ
-
-            pure (outA, outR, outZ)
+            pure (foldVSets inVSets branchVSets)
 
         checkBranch :: Multiplicity -> Type -> CaseBranch -> Checker Type
         checkBranch caseMul discType (CaseBranch pattern body) = do
             -- Extend the context with the pattern under the constraint provided by the case statement
-            (ctx', checkRelevant) <- extendNormal ctx [(caseMul, pattern, discType)]
+            pushStackFrame
+            ctx' <- extendNormal ctx [(caseMul, pattern, discType)]
             -- Check the branch itself
             branchType <- typecheck' ctx' body
             -- Check that any relevant variables introduced within the branch itself have been consumed
             checkRelevant
+            popStackFrame
             pure branchType
 
-        getVarSets :: Checker (VarSet, VarSet, VarSet)
-        getVarSets = do
-            stateContext <- get
-            let inA = stateContext ^. affineVars
-                inR = stateContext ^. relevantVars
-                inZ = stateContext ^. zeroVars
-            pure (inA, inR, inZ)
+        -- We can see here that we fold each set through with either an intersection or union.
+        --
+        -- Affine
+        --  The affine variables are intersected with one another. This is to say that if an affine
+        -- variable is used on any case branch, then it must not be used after the case expression.
+        -- This is essential as we cannot know which branch is taken at typing, so we cannot use it
+        -- anywhere else in the program. So, by taking the intersection of the remaining affine
+        -- variables, we keep only those which were not used in any branch.
+        --
+        -- Relevant
+        --  Here, we take the union. This is because we may only drop the relevant constraint for a
+        -- variable if it is used in every branch, otherwise we cannot be sure that it was used. So,
+        -- the only way a relevant variable remains is if it was not used in every branch.
+        --
+        -- Zero
+        --  Again, we take the union. One way to think of this is that the union of affine and zero
+        -- variables should be invariant. Another way to think about it is that if a variable is moved
+        -- to the zero set among any branch, then it cannot be used in the rest of the program, as that
+        -- branch may be decided. So, we must place it in the zero branch.
+        --
+        -- It is interesting to note that if a linear variable is used in some branches but not others,
+        -- then it will end up in the zero set and the relevant set. However, this is guaranteed to fail:
+        -- the relevant set says we must use the variable to not experience an error, but the zero set
+        -- says we cannot use it. But this is exactly the property we want for linear variables.
+        foldVSets :: CheckVarFrame -> CheckVarFrame -> CheckVarFrame
+        foldVSets a =   (affineVars %~ S.intersection (a ^. affineVars))
+                      . (relevantVars %~ S.intersection (a ^. relevantVars))
+                      . (zeroVars %~ S.intersection (a ^. zeroVars))
 
 typecheck' ctx (L _ (VEApp fun arg)) = do
     funType <- typecheck' ctx fun 
@@ -294,7 +285,7 @@ typecheck' ctx (L _ (VEApp fun arg)) = do
     argType <- typecheck' (tighten ctx funMul) arg
 
     returnType <- freshPolyType
-    unify (location fun) funType Equivalent (FunctionType argType (Arrow funMul) returnType)
+    unify (location fun) funType (FunctionType argType (Arrow funMul) returnType)
     pure returnType
     where
         unpackFunMul :: Type -> Checker Multiplicity
@@ -302,12 +293,14 @@ typecheck' ctx (L _ (VEApp fun arg)) = do
         unpackFunMul _ = freshPolyMul
 
 typecheck' ctx (L _ (VELambda (L _ ann@(Annotated pattern patType)) (L _ (ArrowExpr arrow)) body)) = do
-    (argType, ctx) <- annotationToType ctx ann
-    (arrowMul, ctx) <- annotationToMultiplicity ctx arrow
-    (ctx', checkRelevant) <- extendNormal ctx [(arrowMul, pattern, argType)]
+    argType <- annotationToType ann
+    arrowMul <- annotationToMultiplicity arrow
+    pushStackFrame
+    ctx' <- extendNormal ctx [(arrowMul, pattern, argType)]
     bodyType <- typecheck' ctx' body
     checkTypeEntails ctx argType patType
     checkRelevant
+    popStackFrame
     pure (FunctionType argType (Arrow arrowMul) bodyType)
 
 typecheck' ctx (L loc (VEVar x)) = contextLookup ctx loc x
@@ -327,7 +320,7 @@ typecheckLiteral ctx (ListLiteral es) = do
         unifyElements :: Type -> Loc ValExpr -> Checker ()
         unifyElements t expr = do
             t' <- typecheck' ctx expr
-            unify (location expr) t' LessThan t
+            unify (location expr) t' t
 
 typecheckLiteral ctx (TupleLiteral exprs) = do
     types <- mapM (typecheck' ctx) exprs
@@ -337,17 +330,6 @@ testEverything :: String -> IO ()
 testEverything s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (showError s tvm e)
                      Right t -> putStrLn (showType M.empty t)
-    where
-        fromRight (Right x) = x
-
-testEverything2 :: String -> IO ()
-testEverything2 s = do
-    let res = runReader (runStateT (runExceptT (typecheck' emptyContext (fromRight $ test_parseExpr s))) emptyCheckState) B.defaultBuiltins
-    case res of
-      (Left (e, tvm), _) -> putStrLn (showError s tvm e)
-      (Right t, CheckState { _typeEquivalences = te }) -> do
-          putStrLn (showType M.empty t)
-          putStrLn (DS.pretty te)
     where
         fromRight (Right x) = x
 

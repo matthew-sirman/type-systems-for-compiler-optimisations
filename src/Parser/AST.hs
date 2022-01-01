@@ -31,22 +31,26 @@ data SourceLocation = SL
     , slEnd :: Int
     , slLine :: Int
     }
-    deriving (Eq)
+    deriving (Eq, Generic)
 
 instance Show SourceLocation where
     show loc = "<line: " ++ show (slLine loc) ++ ">: "
+
+instance Hashable SourceLocation
 
 data Loc a = L 
     { location :: SourceLocation 
     , syntax :: a
     }
-    deriving Eq
+    deriving (Eq, Generic)
 
 instance Show a => Show (Loc a) where
     show = show . syntax
 
 instance Functor Loc where
     fmap f (L sl x) = L sl (f x)
+
+instance Hashable a => Hashable (Loc a)
 
 ----------------------------------
 --        AST Data Types        --
