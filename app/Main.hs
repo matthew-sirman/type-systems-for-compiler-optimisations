@@ -36,7 +36,7 @@ runTypeChecker source = do
     ve <- parseSource source
     case typecheck defaultBuiltins ve of
       Left (e, tvm) -> throwError (showError source tvm e)
-      Right t -> lift $ print t
+      Right (t, _) -> lift $ print (typeof t)
 
 pipeline :: Process ()
 pipeline = do

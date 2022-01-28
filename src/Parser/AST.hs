@@ -8,7 +8,7 @@ module Parser.AST
     , TypeExpr(..)
     , Annotated(..)
     , CaseBranch(..)
-    , Pattern(..)
+    , SourcePattern(..)
     , ArrowExpr(..)
     , MultiplicityExpr(..)
     , MultiplicityAtom(..)
@@ -71,7 +71,7 @@ data ValExpr
     = VELet [Loc LetBinding] (Loc ValExpr)
     | VECase (Maybe (Loc MultiplicityExpr)) (Loc ValExpr) (NE.NonEmpty (Loc CaseBranch))
     | VEApp (Loc ValExpr) (Loc ValExpr)
-    | VELambda (Loc (Annotated Pattern)) (Loc ArrowExpr) (Loc ValExpr)
+    | VELambda (Loc (Annotated SourcePattern)) (Loc ArrowExpr) (Loc ValExpr)
     | VEVar Identifier
     | VELiteral (Literal (Loc ValExpr))
     deriving (Eq)
@@ -80,11 +80,11 @@ data TypeDefinition
     = TypeDefinition (Loc Identifier) [Loc Identifier] [Loc Identifier] [Loc (Annotated Identifier)]
     deriving (Eq)
 
-data LetBinding = LetBinding (Maybe (Loc MultiplicityExpr)) (Loc (Annotated Pattern)) (Loc ValExpr)
+data LetBinding = LetBinding (Maybe (Loc MultiplicityExpr)) (Loc (Annotated SourcePattern)) (Loc ValExpr)
     deriving (Eq)
 
 data Literal a
-    = IntLiteral Integer
+    = IntLiteral Int
     | RealLiteral Double
     | ListLiteral [a]
     | TupleLiteral [a]
@@ -103,13 +103,13 @@ data TypeExpr
 data Annotated a = Annotated (Loc a) (Maybe (Loc TypeExpr))
     deriving (Eq)
 
-data CaseBranch = CaseBranch (Loc Pattern) (Loc ValExpr)
+data CaseBranch = CaseBranch (Loc SourcePattern) (Loc ValExpr)
     deriving (Eq)
 
-data Pattern
+data SourcePattern
     = VarPattern Identifier
-    | ConsPattern Identifier [Loc Pattern]
-    | LitPattern (Literal (Loc Pattern))
+    | ConsPattern Identifier [Loc SourcePattern]
+    | LitPattern (Literal (Loc SourcePattern))
     deriving (Eq)
 
 newtype ArrowExpr = ArrowExpr (Maybe (Loc MultiplicityExpr))
@@ -199,6 +199,12 @@ instance Show a => Show (Literal a) where
     show (ListLiteral ls) = show ls
     show (TupleLiteral ts) = "(" ++ intercalate ", " (map show ts) ++ ")"
 
+instance Functor Literal where
+    fmap _ (IntLiteral i) = IntLiteral i
+    fmap _ (RealLiteral r) = RealLiteral r
+    fmap f (ListLiteral ls) = ListLiteral (fmap f ls)
+    fmap f (TupleLiteral ts) = TupleLiteral (fmap f ts)
+
 --------------------------------------
 --        TypeExpr Instances        --
 --------------------------------------
@@ -245,7 +251,7 @@ instance Show CaseBranch where
 --        Pattern Instances        --
 -------------------------------------
 
-instance Show Pattern where
+instance Show SourcePattern where
     show (VarPattern name) = show name
     show (ConsPattern name []) = show name
     show (ConsPattern name args) = "(" ++ show name ++ concatMap ((' ':) . show) args ++ ")"

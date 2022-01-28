@@ -119,7 +119,7 @@ data Token
     | TokUpperId Identifier         -- [A-Z][a-zA-Z_'']*
     | TokMultiplicityId Identifier  -- @[a-z_][a-zA-Z_'']*
 
-    | TokIntegerLit Integer         -- [0-9]+
+    | TokIntegerLit Int             -- [0-9]+
     | TokRealLit Double             -- [0-9]+\.[0-9]+
 
     | TokEndStmt                    -- ;;

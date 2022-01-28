@@ -4,10 +4,21 @@ module Builtin.Builtin where
 
 import Typing.Types
 import Builtin.Types
-import Parser.AST (Identifier(..), MultiplicityAtom(..))
+import Parser.AST 
+    ( Identifier(..)
+    , Loc(..)
+    , MultiplicityAtom(..)
+    , TypeExpr(..)
+    , ArrowExpr(..)
+    , MultiplicityExpr(..)
+    )
+import Parser.Parser (parseType)
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
+import Data.Bifunctor (bimap, first, second)
+
+import Control.Monad.State
 
 type BuiltinFunction = (Identifier, TypeScheme)
 
@@ -42,38 +53,67 @@ types = S.empty
 
 funcEquals, funcNotEquals, funcGreaterThan, funcLessThan, funcGreaterEqual, funcLessEqual,
     funcAdd, funcSub, funcMul, funcDiv, funcUndefined :: BuiltinFunction
-funcEquals = (I "==", TypeScheme (S.singleton 0) S.empty (FunctionType a linear (FunctionType a linear boolType)))
-funcNotEquals = (I "!=", TypeScheme (S.singleton 0) S.empty (FunctionType a linear (FunctionType a linear boolType)))
-funcGreaterThan = (I ">", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear boolType)))
-funcLessThan = (I "<", TypeScheme S.empty S.empty  (FunctionType intType linear (FunctionType intType linear boolType)))
-funcGreaterEqual = (I ">=", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear boolType)))
-funcLessEqual = (I "<=", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear boolType)))
-funcAdd = (I "+", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
-funcSub = (I "-", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
-funcMul = (I "*", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
-funcDiv = (I "/", TypeScheme S.empty S.empty (FunctionType intType linear (FunctionType intType linear intType)))
-funcUndefined = (I "undefined", TypeScheme (S.singleton 0) S.empty (Poly 0))
+funcEquals       = (I "==", makeScheme "a -o a -o Bool")
+funcNotEquals    = (I "!=", makeScheme "a -o a -o Bool")
+funcGreaterThan  = (I ">", makeScheme "a -o a -o Bool")
+funcLessThan     = (I "<", makeScheme "a -o a -o Bool")
+funcGreaterEqual = (I ">=", makeScheme "a -o a -o Bool")
+funcLessEqual    = (I "<=", makeScheme "a -o a -o Bool")
+funcAdd          = (I "+", makeScheme "Int -o Int -o Int")
+funcSub          = (I "-", makeScheme "Int -o Int -o Int")
+funcMul          = (I "*", makeScheme "Int -o Int -o Int")
+funcDiv          = (I "/", makeScheme "Int -o Int -o Int")
+funcUndefined    = (I "undefined", makeScheme "a")
 
 consTrue, consFalse, consListNil, consListCons :: BuiltinFunction
-consTrue = (I "True", normalCons [] boolType)
-consFalse = (I "False", normalCons [] boolType)
-consListNil = (I "[]", normalCons [] (list a))
-consListCons = (I "::", normalCons [a, list a] (list a))
+consTrue = (I "True", makeScheme "Bool")
+consFalse = (I "False", makeScheme "Bool")
+consListNil = (I "[]", makeScheme "[a]")
+consListCons = (I "::", makeScheme "a -o [a] -o [a]")
 
-normalCons :: [Type] -> Type -> TypeScheme
-normalCons args result = TypeScheme (ftv args `S.union` ftv result) S.empty (consType args)
+type TypeBuilder a = State ( (Integer, M.HashMap Identifier Integer)
+                           , (Integer, M.HashMap Identifier Integer)
+                           ) a
+
+makeScheme :: String -> TypeScheme
+makeScheme typeString = case parseType typeString of
+                          Right tExpr -> 
+                              let startState = ((0, M.empty), (0, M.empty))
+                                  (t, ((tvars, _), (mvars, _))) = runState (buildTypeFor tExpr) startState
+                               in TypeScheme (S.fromList [0..(tvars-1)]) (S.fromList [0..(mvars-1)]) t
     where
-        consType :: [Type] -> Type
-        consType [] = result
-        consType (t:ts) = FunctionType t linear (consType ts)
+        buildTypeFor :: Loc TypeExpr -> TypeBuilder Type
+        buildTypeFor (L _ (TEGround name)) = pure (Ground name)
+        buildTypeFor (L _ (TEPoly name)) = do
+            nameMap <- gets (snd . fst)
+            case M.lookup name nameMap of
+              Just id -> pure (Poly id)
+              Nothing -> do
+                  id <- gets (fst . fst)
+                  modify (first (bimap (+1) (M.insert name id)))
+                  pure (Poly id)
+        buildTypeFor (L _ (TEApp fun arg)) = do
+            TypeApp <$> buildTypeFor fun <*> buildTypeFor arg
+        buildTypeFor (L _ (TEArrow from mul to)) = do
+            FunctionType <$> buildTypeFor from <*> buildArrowFor mul <*> buildTypeFor to
+        buildTypeFor (L _ TEUnit) = pure unitType
+        buildTypeFor (L _ (TETuple ts)) = TupleType <$> mapM buildTypeFor ts
+        buildTypeFor (L _ (TEList t)) = TypeApp listTypeCon <$> buildTypeFor t
 
-normal, linear :: Arrow
-linear = Arrow (MAtom Linear)
-normal = Arrow (MAtom Normal)
+        buildArrowFor :: Loc ArrowExpr -> TypeBuilder Arrow
+        buildArrowFor (L _ (ArrowExpr Nothing)) = pure (Arrow (MAtom Normal))
+        buildArrowFor (L _ (ArrowExpr (Just (L _ m)))) = Arrow <$> buildMulFor m
 
-a :: Type
-a = Poly 0
+        buildMulFor :: MultiplicityExpr -> TypeBuilder Multiplicity
+        buildMulFor (MEPoly name) = do
+            nameMap <- gets (snd . snd)
+            case M.lookup name nameMap of
+              Just id -> pure (MPoly id)
+              Nothing -> do
+                  id <- gets (fst . snd)
+                  modify (second (bimap (+1) (M.insert name id)))
+                  pure (MPoly id)
+        buildMulFor (MEAtom atom) = pure (MAtom atom)
+        buildMulFor (MEProd lhs rhs) = MProd <$> buildMulFor lhs <*> buildMulFor rhs
 
-list :: Type -> Type
-list = TypeApp listTypeCon
 

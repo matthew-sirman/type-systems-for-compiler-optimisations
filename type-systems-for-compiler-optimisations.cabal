@@ -27,7 +27,10 @@ library
   exposed-modules:
       Builtin.Builtin
       Builtin.Types
+      Compiler.Bytecode
       Compiler.Compiler
+      Compiler.Size
+      Interpreter.Interpreter
       IR.BasicBlock
       IR.Function
       IR.Instructions
@@ -48,6 +51,8 @@ library
   build-depends:
       array
     , base >=4.7 && <5
+    , binary
+    , bytestring
     , containers
     , disjoint-containers
     , hashable

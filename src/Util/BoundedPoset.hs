@@ -162,8 +162,10 @@ addLeqs = foldM (flip $ uncurry addLeq)
 -------------------------
 -------------------------
 
-leq :: (Eq a, Hashable a) => a -> a -> BoundedPoset core a -> Bool
-leq = reachable
+leq :: (Eq a, Hashable a, FixedCorePoset core a) => a -> a -> BoundedPoset core a -> Bool
+leq a b p = case (unembed a, unembed b) of
+              (Just a', Just b') -> a' <=? b'
+              _ -> reachable a b p
 
 reachable :: forall core a. (Eq a, Hashable a) => a -> a -> BoundedPoset core a -> Bool
 reachable lhs rhs set

@@ -3,7 +3,7 @@ module Typing.Judgement where
 
 import Parser.AST 
     ( Identifier(..)
-    , Pattern(..)
+    , SourcePattern(..)
     , ArrowExpr(..)
     , MultiplicityExpr(..)
     , MultiplicityAtom(..)
@@ -29,14 +29,18 @@ import qualified Data.HashSet as S
 import qualified Data.DisjointSet as DS
 import Data.Maybe (isJust, fromMaybe)
 
-extendGeneralise, extendNormal :: Context -> [(Multiplicity, Loc Pattern, Type)] -> Checker Context
+extendGeneralise, extendNormal :: Context -> [(Multiplicity, Loc SourcePattern, Type)]
+                               -> Checker (Context, [Pattern])
 extendGeneralise = extend True
 extendNormal = extend False
 
-extend :: Bool -> Context -> [(Multiplicity, Loc Pattern, Type)] -> Checker Context
-extend generaliseTypes = foldM extend'
+extend :: Bool -> Context -> [(Multiplicity, Loc SourcePattern, Type)] -> Checker (Context, [Pattern])
+extend _ ctx [] = pure (ctx, [])
+extend generaliseTypes context (patTriple:patTriples) = do
+    (ctx', pat) <- extend' context patTriple
+    ((pat:) <$>) <$> extend generaliseTypes ctx' patTriples
     where
-        extend' :: Context -> (Multiplicity, Loc Pattern, Type) -> Checker Context
+        extend' :: Context -> (Multiplicity, Loc SourcePattern, Type) -> Checker (Context, Pattern)
         extend' ctx (mul, L loc (VarPattern name), t) = do
             termVar <- createTermFor (L loc name)
 
@@ -44,73 +48,55 @@ extend generaliseTypes = foldM extend'
             when (P.maybeLeq mul Affine poset) $ modify (varFrame . affineVars %~ S.insert termVar)
             when (P.maybeLeq mul Relevant poset) $ modify (varFrame . relevantVars %~ S.insert termVar)
             gen <- generalise ctx t mul
-            pure $ (termContext %~ M.insert name gen) ctx
+            pure ((termContext %~ M.insert name gen) ctx, VariablePattern (fst gen ^. baseType) name)
         extend' ctx (mul, L loc (ConsPattern name patterns), t) = do
             conss <- asks (^. dataConstructors)
             case M.lookup name conss of
               Nothing -> typeError $ ConstructorNotInScope loc name
               Just scheme -> do
                   consFunc <- instantiate scheme
-                  checkPatterns ctx consFunc patterns
+                  (ConstructorPattern name <$>) <$> checkPatterns ctx consFunc patterns
             where
-                checkPatterns :: Context -> Type -> [Loc Pattern] -> Checker Context
+                checkPatterns :: Context -> Type -> [Loc SourcePattern] -> Checker (Context, [Pattern])
                 checkPatterns _ (FunctionType {}) [] = typeError $ IncompletePattern loc name
                 checkPatterns ctx retTy [] = do
                     unify loc t retTy
-                    pure ctx
-                checkPatterns ctx' (FunctionType from (Arrow argMul) to) (p:ps) = do
-                    ctx'' <- extend' ctx' (mul @* argMul, p, from)
-                    checkPatterns ctx'' to ps
+                    pure (ctx, [])
+                checkPatterns ctx' (FunctionType from (Arrow argMul) to) (sp:sps) = do
+                    (ctx'', ps)  <- checkPatterns ctx' to sps
+                    ((:ps) <$>) <$> extend' ctx'' (mul @* argMul, sp, from)
                 checkPatterns ctx' t _ = do
                     typeError $ TooManyArguments loc name
-        extend' ctx (mul, L loc (LitPattern literal), t) = extendLiteral ctx mul loc literal t
+        extend' ctx (mul, L loc (LitPattern literal), t) =
+            (LiteralPattern <$>) <$> extendLiteral ctx mul loc literal t
 
-        extendLiteral :: Context -> Multiplicity -> SourceLocation -> Literal (Loc Pattern) -> Type -> Checker Context
-        extendLiteral ctx _ loc (IntLiteral _) t = do
+        extendLiteral :: Context -> Multiplicity -> SourceLocation -> Literal (Loc SourcePattern) -> Type -> Checker (Context, Literal Pattern)
+        extendLiteral ctx _ loc (IntLiteral i) t = do
             unify loc t B.intType
-            pure ctx
-        extendLiteral ctx _ loc (RealLiteral _) t = do
+            pure (ctx, IntLiteral i)
+        extendLiteral ctx _ loc (RealLiteral r) t = do
             unify loc t B.realType
-            pure ctx
+            pure (ctx, RealLiteral r)
         extendLiteral ctx mul loc (ListLiteral ts) t = do
             listType <- freshPolyType
             unify loc t (TypeApp B.listTypeCon listType)
-            foldM (combinator listType) ctx ts
+            (ListLiteral <$>) <$> foldList listType ctx ts
             where
-                combinator :: Type -> Context -> Loc Pattern -> Checker Context
-                combinator listT elemCtx pattern = extend' elemCtx (mul, pattern, listT)
+                foldList :: Type -> Context -> [Loc SourcePattern] -> Checker (Context, [Pattern])
+                foldList _ elemCtx [] = pure (elemCtx, [])
+                foldList listT elemCtx (p:ps) = do
+                    (ctx', pat) <- extend' elemCtx (mul, p, listT)
+                    ((pat:) <$>) <$> foldList listT ctx' ps
         extendLiteral ctx mul loc (TupleLiteral ts) t = do
             typeToFreshMap <- mapM (\t -> (,) t <$> freshPolyType) ts
             unify loc t (TupleType (map snd typeToFreshMap))
-            foldM combinator ctx typeToFreshMap
+            (TupleLiteral <$>) <$> foldTuple ctx typeToFreshMap
             where
-                combinator :: Context -> (Loc Pattern, Type) -> Checker Context
-                combinator elemCtx (pattern, elemType) = extend' elemCtx (mul, pattern, elemType)
-
-        -- createRelevantChecker :: VarSet -> Checker ()
-        -- createRelevantChecker before = do
-        --     after <- lift $ gets (^. relevantVars)
-        --     let remaining = after `S.difference` before
-        --     unless (S.null remaining) $ typeError $ TypeErrorList (violations remaining extensions)
-        --     where
-        --         violations :: VarSet -> [(Multiplicity, Loc Pattern, Type)] -> [TypeError]
-        --         violations remaining = violations'
-        --             where
-        --                 violations' :: [(Multiplicity, Loc Pattern, Type)] -> [TypeError]
-        --                 violations' [] = []
-        --                 violations' ((_, pattern, _):es) = findViolation pattern <> violations' es
-
-        --                 findViolation :: Loc Pattern -> [TypeError]
-        --                 findViolation (L loc (VarPattern name))
-        --                     | name `S.member` remaining = [RelevancyViolation loc name]
-        --                     | otherwise = []
-        --                 findViolation (L _ (ConsPattern _ args)) = concatMap findViolation args
-        --                 findViolation (L _ (LitPattern lit)) = findLitViolation lit
-
-        --                 findLitViolation :: Literal (Loc Pattern) -> [TypeError]
-        --                 findLitViolation (ListLiteral ls) = concatMap findViolation ls
-        --                 findLitViolation (TupleLiteral ts) = concatMap findViolation ts
-        --                 findLitViolation _ = []
+                foldTuple :: Context -> [(Loc SourcePattern, Type)] -> Checker (Context, [Pattern])
+                foldTuple elemCtx [] = pure (elemCtx, [])
+                foldTuple elemCtx ((pattern, elemType):ps) = do
+                    (ctx', pat) <- extend' elemCtx (mul, pattern, elemType)
+                    ((pat:) <$>) <$> foldTuple ctx' ps
 
         generalise :: Context -> Type -> Multiplicity -> Checker (TypeScheme, Multiplicity)
         generalise ctx t mul
@@ -125,7 +111,7 @@ extend generaliseTypes = foldM extend'
 
                 let newBase = substitute (M.map Poly freshTVarMap) (M.map MPoly freshMVarMap) tRep
 
-                pure (TypeScheme (M.keysSet freshTVarMap) (M.keysSet freshMVarMap) newBase, mul)
+                pure (TypeScheme (S.fromList (M.elems freshTVarMap)) (S.fromList (M.elems freshMVarMap)) newBase, mul)
             | otherwise = pure (TypeScheme S.empty S.empty t, mul)
 
 checkRelevant :: Checker ()

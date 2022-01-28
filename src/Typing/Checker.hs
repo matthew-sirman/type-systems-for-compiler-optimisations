@@ -5,6 +5,7 @@ import Parser.Parser (test_parseExpr)
 import Typing.Types
 import Typing.Judgement
 import qualified Util.Stream as Stream
+import qualified Util.BoundedPoset as P
 
 import qualified Builtin.Builtin as B
 import qualified Builtin.Types as B
@@ -21,131 +22,40 @@ import qualified Data.HashSet as S
 
 -- TODO: REMOVE
 import qualified Data.DisjointSet as DS
-import Typing.Types (CheckVarFrame(CheckVarFrame))
 
 -- type RemapperState a = StateT (M.HashMap Identifier TypeVar) CheckerState a
 
-typecheck :: StaticContext -> Loc ValExpr -> Either (TypeError, TypeVarMap) Type
+typecheck :: StaticContext -> Loc ValExpr -> Either (TypeError, TypeVarMap) (TypedExpr, MultiplicityPoset)
 typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheckState) staticCtx
     where
-        checker :: Checker Type
-        checker = typecheck' emptyContext expr >>= typeRepresentative
+        checker :: Checker (TypedExpr, MultiplicityPoset)
+        checker = do
+            typed <- typecheck' emptyContext expr >>= remapToReps
+            poset <- gets (^. mulRelation)
+            pure (typed, poset)
 
--- typecheck expr = flip evalState emptyCheckState $ do
---     -- We construct a new state monad within this evalState call. Then, we
---     -- evaluate the entire monad under the empty check state. Doing this nested
---     -- monadic evaluation allows us to feed the alterations made to the initial
---     -- check state into the main type checker.
---     --
---     -- First, we "remap" the expression. That is, we take each type variable in
---     -- the expression and map it to a unique fresh type variable index. This
---     -- is done such that if "a" in the source maps to variable index n, then each
---     -- instance of "a" maps to the same n.
---     remappedExpr <- remapVars M.empty expr
---     -- After remapping the variables, we run the type checker. This is wrapped in
---     -- an except monad to capture any failures in type checking, so we run the
---     -- except monad at this level.
---     --
---     -- We start with the empty variable context, and the remapped expression.
---     -- Note that we start with linear constraints on the function. This is because
---     -- we define under the assumption that this function will be used once.
---     -- In other words, we are proving the properties about different variables
---     -- in the instance that the function result is consumed exactly once.
---     (remapTypeVars <$>) <$> runExceptT (fst <$> typecheck' emptyContext remappedExpr)
---     where
---         -- The remapVars function works by taking in a top level context, which maps
---         -- variable names to their type variable identifier. This context is fed
---         -- through each layer in the tree, such that type variables are scoped.
---         -- So, for example, in an expression like
---         --  let x : a = e in let y : a = e' in e''
---         -- the two instances of "a" will map to different type variables, as they
---         -- logically are different.
---         -- But, in the expression
---         --  let x : a = let y : a = e in e' in e''
---         -- the two instances of "a" will map to the same type variable, as they are
---         -- logically considered the same.
---         --
---         -- Further, we have the expexted property that in an expression
---         --  let x : a -> a = e in e'
---         -- we have the two "a"s mapping to the same type variable.
---         remapVars :: M.HashMap Identifier TypeVar -> ValExpr Identifier 
---                   -> CheckerState (ValExpr TypeVar)
--- 
---         remapVars ctx (VELet bindings body sl) = do
---             VELet <$> mapM remapBinding bindings <*> remapVars ctx body <*> pure sl
---             where
---                 remapBinding :: LetBinding Identifier 
---                              -> CheckerState (LetBinding TypeVar)
---                 remapBinding (LetBinding m pattern expr) = do
---                     (pattern', boundCtx) <- runStateT (traverse remap pattern) ctx
---                     LetBinding m pattern' <$> remapVars boundCtx expr
---         remapVars ctx (VECase m disc branches sl) =
---             VECase m <$> remapVars ctx disc <*> traverse remapBranch branches <*> pure sl
---             where
---                 remapBranch :: CaseBranch Identifier -> CheckerState (CaseBranch TypeVar)
---                 remapBranch (CaseBranch pattern expr) = CaseBranch pattern <$> remapVars ctx expr
---         remapVars ctx (VEApp fun arg sl) =
---             VEApp <$> remapVars ctx fun <*> remapVars ctx arg <*> pure sl
---         remapVars ctx (VELambda pattern arrow body sl) = do
---             (pattern', boundCtx) <- runStateT (traverse remap pattern) ctx
---             VELambda pattern' arrow <$> remapVars boundCtx body <*> pure sl
---         remapVars _ (VEVar v sl) = pure (VEVar v sl)
---         remapVars ctx (VELiteral literal sl) =
---             VELiteral <$> traverse (remapVars ctx) literal <*> pure sl
--- 
---         -- Remap an individual variable name to a type variable
---         remap :: Identifier -> RemapperState TypeVar
---         remap name = do
---             -- Get the current mapping
---             mapped <- gets (M.lookup name)
---             case mapped of
---               -- If the variable is currently unmapped, then create
---               -- a fresh variable, insert it into the map and return it
---               Nothing -> do
---                   v <- lift freshVar
---                   modify (M.insert name v)
---                   pure v
---               -- Otherwise just return the variable
---               Just var -> pure var
--- 
---         -- This function takes a type expression which has numeric values for type variables, and
---         -- maps it into an expression which uses named identifiers instead
---         --
---         -- TODO: Reverse the mapping from above in the case that the code explicitly stated a type
---         -- variable which has now been given a new name
---         -- TODO: Consider whether this is actually the correct place to have this inverse mapping
---         remapTypeVars :: TypeExpr TypeVar -> TypeExpr Identifier
---         remapTypeVars expr = evalState (traverse remapOne expr) (M.empty, varNameStream)
---             where
---                 remapOne :: TypeVar -> State (M.HashMap TypeVar Identifier, Stream.Stream String) Identifier
---                 remapOne var = do
---                     -- Get the current mapping and get the head of the stream
---                     (varMap, name Stream.:> names) <- get
---                     -- Check if the variable has already been mapped
---                     case M.lookup var varMap of
---                       Nothing -> do
---                           -- If not, then insert the variable into the mapping and
---                           -- update the stream to include only the tail
---                           put (M.insert var name varMap, names)
---                           -- Return the name
---                           pure name
---                       -- Otherwise just return the name
---                       Just name' -> pure name'
---         
---         -- An infinite stream of variable names which looks like
---         --  a, b, c, ..., x, y, z, a', b', .. y', z', a'', b'', ...
---         varNameStream :: Stream.Stream String
---         varNameStream = vns' (map pure "abcdefghijklmnopqrstuvwxyz")
---             where
---                 vns' :: [String] -> Stream.Stream String
---                 vns' names = build names
---                     where
---                         build :: [String] -> Stream.Stream String
---                         build [] = vns' (map (++ "'") names)
---                         build (n:ns) = n Stream.:> build ns
+        remapToReps :: TypedExpr -> Checker TypedExpr
+        remapToReps (Let t binds body) =
+            Let <$> typeRepresentative t <*> mapM remapBind binds <*> remapToReps body
+            where
+                remapBind :: TypedLetBinding -> Checker TypedLetBinding
+                remapBind (TypedLetBinding mul pat bind) = TypedLetBinding mul pat <$> remapToReps bind
+        remapToReps (Case t mul disc branches) =
+            Case <$> typeRepresentative t <*> pure mul <*> remapToReps disc <*> mapM remapBranch branches
+            where
+                remapBranch :: TypedCaseBranch -> Checker TypedCaseBranch
+                remapBranch (TypedCaseBranch pat expr) = TypedCaseBranch pat <$> remapToReps expr
+        remapToReps (Application t fun arg) =
+            Application <$> typeRepresentative t <*> remapToReps fun <*> remapToReps arg
+        remapToReps (Lambda t mul arg body) =
+            Lambda <$> typeRepresentative t <*> pure mul <*> pure arg <*> remapToReps body
+        remapToReps (Variable t name) =
+            Variable <$> typeRepresentative t <*> pure name
+        remapToReps (Literal t lit) =
+            Literal <$> typeRepresentative t <*> pure lit
 
 -- Typecheck and infer the type of an expression under a given variable context.
-typecheck' :: Context -> Loc ValExpr -> Checker Type
+typecheck' :: Context -> Loc ValExpr -> Checker TypedExpr
 
 typecheck' ctx (L _ (VELet bindings body)) = do
     -- Check each let binding and get a list of their constriants, patterns and types,
@@ -153,15 +63,15 @@ typecheck' ctx (L _ (VELet bindings body)) = do
     extensions <- checkLetBindings
     -- Extend the context with the generalised types we inferred
     pushStackFrame
-    ctx' <- extendGeneralise ctx extensions
+    (ctx', patterns) <- extendGeneralise ctx (map (fmap typeof) extensions)
     -- Typecheck the body under the extended context
-    bodyType <- typecheck' ctx' body
+    typedBody <- typecheck' ctx' body
     -- Check that any relevant variables introduced are now consumed
     checkRelevant
     popStackFrame
-    pure bodyType
+    pure (Let (typeof typedBody) (reconstructBinders extensions patterns) typedBody)
     where
-        checkLetBindings :: Checker [(Multiplicity, Loc Pattern, Type)]
+        checkLetBindings :: Checker [(Multiplicity, Loc SourcePattern, TypedExpr)]
         checkLetBindings = do
             let projectAnnotation (LetBinding _ ann _) = syntax ann
                 annotatedPatterns = map (projectAnnotation . syntax) bindings
@@ -174,13 +84,13 @@ typecheck' ctx (L _ (VELet bindings body)) = do
             -- bound expressions
             --
             -- We always extend with normal multiplicity for recursive function bindings.
-            ctx' <- extendNormal ctx (zip3 (repeat $ MAtom Normal) patterns initialBoundTypes)
+            (ctx', _) <- extendNormal ctx (zip3 (repeat $ MAtom Normal) patterns initialBoundTypes)
             -- Next, we map over checking each binding to get a list of the types we inferred
             result <- mapM (checkBinding ctx') (zip (map syntax bindings) initialBoundTypes)
             popStackFrame
             pure result
 
-        checkBinding :: Context -> (LetBinding, Type) -> Checker (Multiplicity, Loc Pattern, Type)
+        checkBinding :: Context -> (LetBinding, Type) -> Checker (Multiplicity, Loc SourcePattern, TypedExpr)
         checkBinding ctx' (binding, initialBoundType) = do
             let (LetBinding m (L _ (Annotated pattern patType)) bound) = binding
             letMul <- annotationToMultiplicity m
@@ -190,15 +100,20 @@ typecheck' ctx (L _ (VELet bindings body)) = do
             -- as we could then indirectly violate the multiplicity constraint. So, we tighten
             -- the context to prevent stronger values from being used incorrectly
             pushStackFrame
-            boundType <- typecheck' (tighten ctx' letMul) bound
+            typedBinder <- typecheck' (tighten ctx' letMul) bound
             popStackFrame
-            unify (location bound) initialBoundType boundType
+            unify (location bound) initialBoundType (typeof typedBinder)
             -- Check that if there was an explicit annotation, that the type we inferred unifies with it.
             -- If there was an annotation, and we have inferred a type which proves the annotation is
             -- appropriate, then we should just use the annotation
-            checkTypeEntails ctx' boundType patType
+            checkTypeEntails ctx' (typeof typedBinder) patType
             -- Add the constraint pattern type triple for this binding
-            pure (letMul, pattern, boundType)
+            pure (letMul, pattern, typedBinder)
+
+        reconstructBinders :: [(Multiplicity, Loc SourcePattern, TypedExpr)] -> [Pattern] -> [TypedLetBinding]
+        reconstructBinders [] [] = []
+        reconstructBinders ((mul, _, expr):exprs) (pat:pats) =
+            TypedLetBinding mul pat expr : reconstructBinders exprs pats
 
 typecheck' ctx (L _ (VECase mul disc branches)) = do
     caseMul <- annotationToMultiplicity mul
@@ -206,7 +121,7 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
     -- We need to tighten constraints for the discriminator expression - these are extended to account
     -- for the fact that we will destruct the discriminator `caseM` times - so if `caseM` is
     -- a weaker multiplicity than the current constraint, we must tighten.
-    discType <- typecheck' (tighten ctx caseMul) disc
+    typedDisc <- typecheck' (tighten ctx caseMul) disc
 
     -- Get the variable constraint sets. These must be folded through the branches to check
     -- how each branch uses them.
@@ -217,38 +132,40 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
     -- the current best type, and the type we have just seen for this branch. Then, we will feed
     -- this newly unified type onto the next branch.
     initialBranchType <- freshPolyType
-    outVSets <- foldM (compareBranches caseMul discType initialBranchType) vSets branches
-    modify (varFrame .~ outVSets)
-    typeRepresentative initialBranchType
+    (branchVSets, branches) <- NE.unzip <$> mapM (compareBranches caseMul (typeof typedDisc) initialBranchType) branches
+    modify (varFrame .~ foldl foldVSets vSets branchVSets)
+    branchType <- typeRepresentative initialBranchType
+    pure (Case branchType caseMul typedDisc branches)
     where
-        compareBranches :: Multiplicity -> Type -> Type -> CheckVarFrame
+        compareBranches :: Multiplicity -> Type -> Type
                         -> Loc CaseBranch
-                        -> Checker CheckVarFrame
+                        -> Checker (CheckVarFrame, TypedCaseBranch)
 
-        compareBranches caseMul discType branchType inVSets branch = do
+        compareBranches caseMul discType branchType branch = do
             -- Then, we actually check the branch. This returns firstly the type we infer from the
             -- branch
             pushVarFrame
-            branchType' <- checkBranch caseMul discType (syntax branch)
+            typedBranch <- checkBranch caseMul discType (syntax branch)
             branchVSets <- gets (^. varFrame)
             popVarFrame
             -- Now we unify our updated view of the previously expected branch type with the newly
             -- inferred branch type.
-            unify (location branch) branchType branchType'
+            unify (location branch) branchType (typeof typedBranch)
 
-            pure (foldVSets inVSets branchVSets)
+            pure (branchVSets, typedBranch)
 
-        checkBranch :: Multiplicity -> Type -> CaseBranch -> Checker Type
+        checkBranch :: Multiplicity -> Type -> CaseBranch -> Checker TypedCaseBranch
         checkBranch caseMul discType (CaseBranch pattern body) = do
             -- Extend the context with the pattern under the constraint provided by the case statement
             pushStackFrame
-            ctx' <- extendNormal ctx [(caseMul, pattern, discType)]
+            (ctx', pats) <- extendNormal ctx [(caseMul, pattern, discType)]
+            let [pat] = pats
             -- Check the branch itself
-            branchType <- typecheck' ctx' body
+            typedBranch <- typecheck' ctx' body
             -- Check that any relevant variables introduced within the branch itself have been consumed
             checkRelevant
             popStackFrame
-            pure branchType
+            pure (TypedCaseBranch pat typedBranch)
 
         -- We can see here that we fold each set through with either an intersection or union.
         --
@@ -280,13 +197,13 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
                       . (zeroVars %~ S.intersection (a ^. zeroVars))
 
 typecheck' ctx (L _ (VEApp fun arg)) = do
-    funType <- typecheck' ctx fun 
-    funMul <- unpackFunMul funType
-    argType <- typecheck' (tighten ctx funMul) arg
+    typedFun <- typecheck' ctx fun 
+    funMul <- unpackFunMul (typeof typedFun)
+    typedArg <- typecheck' (tighten ctx funMul) arg
 
     returnType <- freshPolyType
-    unify (location fun) funType (FunctionType argType (Arrow funMul) returnType)
-    pure returnType
+    unify (location fun) (typeof typedFun) (FunctionType (typeof typedArg) (Arrow funMul) returnType)
+    pure (Application returnType typedFun typedArg)
     where
         unpackFunMul :: Type -> Checker Multiplicity
         unpackFunMul (FunctionType _ (Arrow m) _) = pure m
@@ -296,40 +213,41 @@ typecheck' ctx (L _ (VELambda (L _ ann@(Annotated pattern patType)) (L _ (ArrowE
     argType <- annotationToType ann
     arrowMul <- annotationToMultiplicity arrow
     pushStackFrame
-    ctx' <- extendNormal ctx [(arrowMul, pattern, argType)]
-    bodyType <- typecheck' ctx' body
+    (ctx', pats) <- extendNormal ctx [(arrowMul, pattern, argType)]
+    let [pat] = pats
+    typedBody <- typecheck' ctx' body
     checkTypeEntails ctx argType patType
     checkRelevant
     popStackFrame
-    pure (FunctionType argType (Arrow arrowMul) bodyType)
+    pure (Lambda (FunctionType argType (Arrow arrowMul) (typeof typedBody)) arrowMul pat typedBody)
 
-typecheck' ctx (L loc (VEVar x)) = contextLookup ctx loc x
+typecheck' ctx (L loc (VEVar x)) = Variable <$> contextLookup ctx loc x <*> pure x
 
 typecheck' ctx (L _ (VELiteral lit)) = typecheckLiteral ctx lit
 
-typecheckLiteral :: Context -> Literal (Loc ValExpr) -> Checker Type
-typecheckLiteral _ (IntLiteral _) = pure B.intType
+typecheckLiteral :: Context -> Literal (Loc ValExpr) -> Checker TypedExpr
+typecheckLiteral _ (IntLiteral i) = pure (Literal B.intType (IntLiteral i))
 
-typecheckLiteral _ (RealLiteral _) = pure B.realType
+typecheckLiteral _ (RealLiteral r) = pure (Literal B.realType (RealLiteral r))
 
 typecheckLiteral ctx (ListLiteral es) = do
     initialListType <- freshPolyType
-    mapM_ (unifyElements initialListType) es
-    pure (TypeApp B.listTypeCon initialListType)
+    Literal (TypeApp B.listTypeCon initialListType) . ListLiteral <$> mapM (unifyElements initialListType) es
     where
-        unifyElements :: Type -> Loc ValExpr -> Checker ()
+        unifyElements :: Type -> Loc ValExpr -> Checker TypedExpr
         unifyElements t expr = do
             t' <- typecheck' ctx expr
-            unify (location expr) t' t
+            unify (location expr) (typeof t') t
+            pure t'
 
 typecheckLiteral ctx (TupleLiteral exprs) = do
-    types <- mapM (typecheck' ctx) exprs
-    pure (TupleType types)
+    typedExprs <- mapM (typecheck' ctx) exprs
+    pure (Literal (TupleType (map typeof typedExprs)) (TupleLiteral typedExprs))
 
 testEverything :: String -> IO ()
 testEverything s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (showError s tvm e)
-                     Right t -> putStrLn (showType M.empty t)
+                     Right (t, _) -> putStrLn (showType M.empty (typeof t))
     where
         fromRight (Right x) = x
 

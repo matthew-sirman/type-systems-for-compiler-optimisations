@@ -32,6 +32,8 @@ library:
   - disjoint-containers
   - lens
   - hashable
+  - binary
+  - bytestring
 
 executables:
   type-systems-for-compiler-optimisations-exe:

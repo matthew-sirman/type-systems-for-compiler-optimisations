@@ -5,9 +5,16 @@ module Typing.Types
     , TermVar
     , TypeVar
     , MultiplicityVar , TypeVarMap
+    , MultiplicityPoset
     , Type(..)
     , Multiplicity(..)
     , Arrow(..)
+    , TypedExpr(..)
+    , TypedCaseBranch(..)
+    , TypedLetBinding(..)
+    , Pattern(..)
+    , typeof
+
     , CheckStackFrame(..)
     , termNameContext
     , addedTermNames
@@ -55,7 +62,9 @@ import Parser.AST
     ( Identifier(..)
     , SourceLocation(..)
     , Loc(..)
+    , SourcePattern(..)
     , MultiplicityAtom(..)
+    , Literal(..)
     )
 
 import qualified Util.Stream as Stream
@@ -65,6 +74,7 @@ import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import qualified Data.DisjointSet as DS
 import Data.List (intercalate)
+import qualified Data.List.NonEmpty as NE
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -101,6 +111,8 @@ type TermVar = Integer
 type TypeVar = Integer
 type MultiplicityVar = Integer
 type TypeVarMap = M.HashMap TypeVar Identifier
+
+type MultiplicityPoset = P.BoundedPoset MultiplicityAtom Multiplicity
 
 data Type
     = Poly TypeVar
@@ -152,6 +164,40 @@ instance Show Arrow where
     show (Arrow (MAtom Linear)) = "-o"
     show (Arrow m) = "-> " ++ show m
 
+class TypeContainer a where
+    typeof :: a -> Type
+
+data TypedExpr
+    = Let Type [TypedLetBinding] TypedExpr
+    | Case Type Multiplicity TypedExpr (NE.NonEmpty TypedCaseBranch)
+    | Application Type TypedExpr TypedExpr
+    | Lambda Type Multiplicity Pattern TypedExpr
+    | Variable Type Identifier
+    | Literal Type (Literal TypedExpr)
+    
+instance TypeContainer TypedExpr where
+    typeof (Let t _ _) = t
+    typeof (Case t _ _ _) = t
+    typeof (Application t _ _) = t
+    typeof (Lambda t _ _ _) = t
+    typeof (Variable t _) = t
+    typeof (Literal t _) = t
+
+data TypedLetBinding = TypedLetBinding Multiplicity Pattern TypedExpr
+
+instance TypeContainer TypedLetBinding where
+    typeof (TypedLetBinding _ _ e) = typeof e
+
+data TypedCaseBranch = TypedCaseBranch Pattern TypedExpr
+
+instance TypeContainer TypedCaseBranch where
+    typeof (TypedCaseBranch _ e) = typeof e
+
+data Pattern
+    = VariablePattern Type Identifier
+    | ConstructorPattern Identifier [Pattern]
+    | LiteralPattern (Literal Pattern)
+
 data CheckStackFrame = CheckStackFrame
     { _termNameContext :: M.HashMap Identifier TermVar
     , _addedTermNames :: S.HashSet (Loc Identifier)
@@ -183,7 +229,7 @@ data CheckState = CheckState
 
     , _freshMulVars         :: Stream.Stream MultiplicityVar
     , _mulEquivalences      :: DS.DisjointSet Multiplicity
-    , _mulRelation          :: P.BoundedPoset MultiplicityAtom Multiplicity
+    , _mulRelation          :: MultiplicityPoset
 
     , _termVarAssignments   :: M.HashMap TermVar Identifier
     , _typeVarAssignments   :: TypeVarMap

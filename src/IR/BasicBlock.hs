@@ -14,7 +14,7 @@ data BasicBlock r = BasicBlock
 makeLenses ''BasicBlock
 
 instance Show r => Show (BasicBlock r) where
-    show bb = show (bb ^. label) ++ "\n:" ++ concatMap (\i -> "    " ++ show i ++ "\n") (bb ^. iList)
+    show bb = show (bb ^. label) ++ ":\n" ++ concatMap (\i -> "    " ++ show i ++ "\n") (bb ^. iList)
 
 makeBasicBlock :: Label -> BasicBlock r
 makeBasicBlock l = BasicBlock l Seq.empty

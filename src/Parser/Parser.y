@@ -1,6 +1,7 @@
 {
 module Parser.Parser 
     ( parse
+    , parseType
 
     , test_parseStmt
     , test_parseExpr
@@ -17,6 +18,7 @@ import Data.Maybe (fromJust)
 }
 
 %name alexParser program
+%name alexTypeParser type
 
 %name test_alexStmtParser stmt
 %name test_alexExprParser expr
@@ -182,17 +184,17 @@ case_branches :: { NE.NonEmpty (Loc CaseBranch) }
 case_branch :: { Loc CaseBranch }
     : '|' pattern '->' expr                             { loc (CaseBranch $2 $4) $1 $> }
 
-pattern_list :: { [Loc Pattern] }
+pattern_list :: { [Loc SourcePattern] }
     : pattern                                           { [$1] }
     | pattern pattern_list                              { $1 : $2 }
 
-pattern :: { Loc Pattern }
+pattern :: { Loc SourcePattern }
     : uvar                                              { loc (ConsPattern (rawId $1) []) $1 $> }
     | '(' uvar pattern_list ')'                         { loc (ConsPattern (rawId $2) $3) $1 $> }
     | '(' pattern '::' pattern ')'                      { loc (ConsPattern (I "::") [$2, $4]) $1 $> }
     | pattern_atom                                      { $1 }
 
-pattern_atom :: { Loc Pattern }
+pattern_atom :: { Loc SourcePattern }
     : int                                               { loc (LitPattern (IntLiteral (intTok $1))) $1 $> }
     | real                                              { loc (LitPattern (RealLiteral (realTok $1))) $1 $> }
     | tuple(pattern)                                    { (LitPattern . TupleLiteral) <\$> $1 }
@@ -256,16 +258,16 @@ rawId (L _ (TokLowerId name)) = name
 rawId (L _ (TokUpperId name)) = name
 rawId (L _ (TokMultiplicityId name)) = name
 
-intTok :: Loc Token -> Integer
+intTok :: Loc Token -> Int
 intTok (L _ (TokIntegerLit i)) = i
 
 realTok :: Loc Token -> Double
 realTok (L _ (TokRealLit r)) = r
 
-makeFuncDecl :: Loc Identifier -> [Loc Pattern] -> Loc ValExpr -> Statement
+makeFuncDecl :: Loc Identifier -> [Loc SourcePattern] -> Loc ValExpr -> Statement
 makeFuncDecl name patterns expr = FuncDecl name (transformLambdas patterns)
     where
-        transformLambdas :: [Loc Pattern] -> Loc ValExpr
+        transformLambdas :: [Loc SourcePattern] -> Loc ValExpr
         transformLambdas [] = expr
         transformLambdas (p@(L sl _):ps) = L sl $ VELambda (L sl (Annotated p Nothing)) (L sl (ArrowExpr Nothing)) (transformLambdas ps)
 
@@ -282,13 +284,13 @@ makeTypeDef start name pVars mVars cs
 makeIfCase :: Maybe (Loc MultiplicityExpr) -> Loc ValExpr -> Loc ValExpr -> Loc ValExpr -> ValExpr
 makeIfCase m cond ifT@(L trueLoc _) ifF@(L falseLoc _) = VECase m cond (thenBranch NE.:| [elseBranch])
     where
-        thenBranch = L trueLoc (CaseBranch (L trueLoc (VarPattern (I "True"))) ifT)
-        elseBranch = L falseLoc (CaseBranch (L falseLoc (VarPattern (I "False"))) ifF)
+        thenBranch = L trueLoc (CaseBranch (L trueLoc (ConsPattern (I "True") [])) ifT)
+        elseBranch = L falseLoc (CaseBranch (L falseLoc (ConsPattern (I "False") [])) ifF)
 
 makeBinOp :: Loc ValExpr -> Loc ValExpr -> Loc ValExpr -> ValExpr
 makeBinOp lhs op rhs = VEApp (loc (VEApp op lhs) lhs op) rhs
 
-makeLetBinding :: Maybe (Loc MultiplicityExpr) -> Loc (Annotated Pattern) -> Loc ValExpr -> Loc LetBinding
+makeLetBinding :: Maybe (Loc MultiplicityExpr) -> Loc (Annotated SourcePattern) -> Loc ValExpr -> Loc LetBinding
 makeLetBinding Nothing pattern expr = loc (LetBinding Nothing pattern expr) pattern expr
 makeLetBinding m@(Just start) pattern expr = loc (LetBinding m pattern expr) start expr
 
@@ -318,6 +320,9 @@ getLineNumber = do
 parse :: String -> Either String [Loc Statement]
 parse s = runAlex s alexParser
 
+parseType :: String -> Either String (Loc TypeExpr)
+parseType s = runAlex s alexTypeParser
+
 test_parseStmt :: String -> Either String (Loc Statement)
 test_parseStmt s = runAlex s test_alexStmtParser
 
@@ -330,7 +335,7 @@ test_parseDatatype s = runAlex s test_alexDatatypeParser
 test_parseType :: String -> Either String (Loc TypeExpr)
 test_parseType s = runAlex s test_alexTypeParser
 
-test_parsePattern :: String -> Either String (Loc Pattern)
+test_parsePattern :: String -> Either String (Loc SourcePattern)
 test_parsePattern s = runAlex s test_alexPatternParser
 
 }
