@@ -26,6 +26,7 @@ source-repository head
 library
   exposed-modules:
       Builtin.Builtin
+      Builtin.Codegen
       Builtin.Types
       Compiler.Bytecode
       Compiler.Compiler

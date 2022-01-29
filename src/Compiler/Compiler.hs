@@ -2,7 +2,7 @@
 module Compiler.Compiler where
 
 import Parser.AST (MultiplicityAtom(..), Identifier(..), Literal(..))
-import Typing.Types
+import qualified Typing.Types as T
 import qualified Util.BoundedPoset as P
 import qualified Util.Stream as Stream
 
@@ -17,8 +17,10 @@ import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import Data.Sequence as Seq
 import Data.Bifunctor (bimap)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Word
+import Data.Foldable (toList)
+import qualified Data.List.NonEmpty as NE
 import Control.Monad.State
 import Control.Monad.Reader
 import Control.Lens hiding (Strict, Lazy)
@@ -48,6 +50,15 @@ instance Show Variable where
     show (Strict var) = "tmp" ++ show var
     show (Lazy var _ _ _) = "lzy" ++ show var
     show (Argument arg) = "arg" ++ show arg
+
+data CodegenExpr
+    = Variable T.Type Identifier
+    | Application T.Type CodegenExpr [CodegenExpr]
+    | PrimApp T.Type Identifier [CodegenExpr]
+    | ConsApp T.Type Identifier [CodegenExpr]
+    | Lambda T.Type [T.Pattern] CodegenExpr
+    | Case T.Type CodegenExpr (NE.NonEmpty (T.Pattern, CodegenExpr))
+    | Let T.Type [(T.Multiplicity, T.Pattern, CodegenExpr)] CodegenExpr
 
 data CompileState = CompileState
     { _blockStack :: [BasicBlock]
@@ -79,64 +90,72 @@ makeLenses ''CompilerInfo
 -- the thunk for 'z' does need to capture 'y', as 'y' depends on 'x' which is free.
 --
 -- So, as of now, 'y' is captured conservatively in both cases.
-freeVars :: S.HashSet Identifier -> TypedExpr -> M.HashMap Identifier Type
-freeVars ignore (Let _ bindings body) =
-    let extractNames (TypedLetBinding _ pattern _) = namesInBinding pattern
+freeVars :: S.HashSet Identifier -> T.TypedExpr -> M.HashMap Identifier T.Type
+freeVars ignore (T.Let _ bindings body) =
+    let extractNames (T.TypedLetBinding _ pattern _) = namesInBinding pattern
         allNames = S.union ignore (foldMap extractNames bindings)
         
-        bindingFVs (TypedLetBinding _ _ binding) = freeVars allNames binding
+        bindingFVs (T.TypedLetBinding _ _ binding) = freeVars allNames binding
      in M.union (freeVars allNames body) (foldMap bindingFVs bindings)
-freeVars ignore (Case _ _ disc branches) = M.union (freeVars ignore disc) (foldMap branchFVs branches)
+freeVars ignore (T.Case _ _ disc branches) = M.union (freeVars ignore disc) (foldMap branchFVs branches)
     where
-        branchFVs :: TypedCaseBranch -> M.HashMap Identifier Type
-        branchFVs (TypedCaseBranch pattern body) = freeVars (S.union ignore (namesInBinding pattern)) body
-freeVars ignore (Application _ fun arg) = M.union (freeVars ignore fun) (freeVars ignore arg)
-freeVars ignore (Lambda _ _ arg body) = freeVars (S.union ignore (namesInBinding arg)) body
-freeVars ignore (Variable t name)
+        branchFVs :: T.TypedCaseBranch -> M.HashMap Identifier T.Type
+        branchFVs (T.TypedCaseBranch pattern body) = freeVars (S.union ignore (namesInBinding pattern)) body
+freeVars ignore (T.Application _ fun arg) = M.union (freeVars ignore fun) (freeVars ignore arg)
+freeVars ignore (T.Lambda _ _ arg body) = freeVars (S.union ignore (namesInBinding arg)) body
+freeVars ignore (T.Variable t name)
     | S.member name ignore = M.empty
     | otherwise = M.singleton name t
-freeVars ignore (Literal _ lit) = litFVs lit
+freeVars ignore (T.Literal _ lit) = litFVs lit
     where
-        litFVs :: Literal TypedExpr -> M.HashMap Identifier Type
+        litFVs :: Literal T.TypedExpr -> M.HashMap Identifier T.Type
         litFVs (IntLiteral _) = M.empty
         litFVs (RealLiteral _) = M.empty
         litFVs (ListLiteral ls) = foldMap (freeVars ignore) ls
         litFVs (TupleLiteral ts) = foldMap (freeVars ignore) ts
 
-namesInBinding :: Pattern -> S.HashSet Identifier
-namesInBinding (VariablePattern _ name) = S.singleton name
-namesInBinding (ConstructorPattern _ ps) = foldMap namesInBinding ps
-namesInBinding (LiteralPattern lit) = namesInLiteral lit
+namesInBinding :: T.Pattern -> S.HashSet Identifier
+namesInBinding (T.VariablePattern _ name) = S.singleton name
+namesInBinding (T.ConstructorPattern _ ps) = foldMap namesInBinding ps
+namesInBinding (T.LiteralPattern lit) = namesInLiteral lit
     where
-        namesInLiteral :: Literal Pattern -> S.HashSet Identifier
+        namesInLiteral :: Literal T.Pattern -> S.HashSet Identifier
         namesInLiteral (IntLiteral _) = S.empty
         namesInLiteral (RealLiteral _) = S.empty
         namesInLiteral (ListLiteral ls) = foldMap namesInBinding ls
         namesInLiteral (TupleLiteral ts) = foldMap namesInBinding ts
 
+convertAST :: T.TypedExpr -> CodegenExpr
+convertAST (T.Let t bindings body) = undefined
+convertAST (T.Case t _ disc branches) = undefined
+convertAST (T.Application t fun arg) = undefined
+convertAST (T.Lambda t pattern arrow body) = undefined
+convertAST (T.Variable t name) = undefined
+convertAST (T.Literal t val) = undefined
+
 type Compiler a = ReaderT CompilerInfo (State CompileState) a
 
-compile :: TypedExpr -> MultiplicityPoset -> CompileState
+compile :: T.TypedExpr -> T.MultiplicityPoset -> CompileState
 compile expr poset = execState (runReaderT finalise startInfo) startState
     where
         finalise :: Compiler ()
         finalise = do
-            pushFreshFunction (Just (I "main")) []
-            createBlock
+            pushFunction (Just (I "main")) []
+            pushBlock
             programResult <- codegen expr
             forced <- forceCompute programResult
             addInstruction $ IR.Return (Just forced)
-            popBlock >>= applyBlock
+            popBlock
             void popFunction
 
-        codegen :: TypedExpr -> Compiler Value
-        codegen (Let _ bindings body) = do
+        codegen :: T.TypedExpr -> Compiler Value
+        codegen (T.Let _ bindings body) = do
             boundVars <- M.unions <$> mapM genBinding bindings
             local (nameMap %~ M.union boundVars) $ codegen body
             where
-                genBinding :: TypedLetBinding -> Compiler NameMap
-                genBinding (TypedLetBinding mul pattern binding) =
-                    if eager mul
+                genBinding :: T.TypedLetBinding -> Compiler NameMap
+                genBinding (T.TypedLetBinding mul pattern binding) =
+                    if eager mul || isLambda binding
                        then generator
                        else do
                            recs <- asks (^. recursiveBindings)
@@ -146,46 +165,40 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                         generator = do
                             let recs = namesInBinding pattern
                             value <- local (recursiveBindings %~ S.union recs) $ codegen binding
-                            unpackPattern (addInstruction $ IR.Throw 1) pattern value
+                            fst <$> unpackPattern (addInstruction $ IR.Throw 1) pattern value
 
-        codegen (Case _ _ disc branches) = do
+                        isLambda :: T.TypedExpr -> Bool
+                        isLambda (T.Lambda {}) = True
+                        isLambda _ = False
+
+        codegen (T.Case _ _ disc branches) = do
             discVal <- codegen disc
             forcedDisc <- forceCompute discVal
-            -- unpack b1
-            -- unpack b2
-            pure ()
-            pure forcedDisc
+            pushBlock
+            phiNodes <- genBranches forcedDisc (toList branches)
+            popBlock
+            result <- Strict <$> newVar
+            addInstruction $ IR.Phi result phiNodes
+            pure (IR.ValVariable result)
             where
-                genBranches :: Value -> [TypedCaseBranch] -> Compiler [Value]
-                genBranches _ [] = pure []
-                genBranches var (TypedCaseBranch pattern expr:rest) = do
-                    --  case x of | 0 -> 0 | 1 -> 1 | 2 -> 2
-                    --
-                    --        tmp0 <- ... generate x ...
-                    --        br tmp0 = 0 case0
-                    --        br tmp0 = 1 case1
-                    --        br tmp0 = 2 case2
-                    --        jmp rest
-                    -- case0: tmp1 <- 0
-                    --        jmp rest
-                    -- case1: tmp2 <- 1
-                    --        jmp rest
-                    -- case2: tmp3 <- 2
-                    --        jmp rest
-                    --  fail: throw 1
-                    --  rest: tmp4 <- phi [ case0 : tmp1, case1 : tmp2, case2: tmp3 ]
-                    --
-                    -- (names, results) <- unpackPattern (genBranches var rest) pattern var
+                genBranches :: Value -> [T.TypedCaseBranch] -> Compiler [PhiNode]
+                genBranches _ [] = do
+                    addInstruction $ IR.Throw 1
                     pure []
+                genBranches var (T.TypedCaseBranch pattern expr:rest) = do
+                    (names, fail) <- unpackPattern (genBranches var rest) pattern var
+                    branchVal <- local (nameMap %~ M.union names) $ codegen expr
+                    branchLabel <- blockLabel
+                    pure (IR.PhiNode (branchVal, branchLabel) : fromMaybe [] fail)
 
-        codegen (Application _ fun arg) = do
+        codegen (T.Application _ fun arg) = do
             funVal <- codegen fun
             argVal <- codegen arg
             forcedFun <- forceCompute funVal
-            let (FunctionType _ (Arrow mul) _) = typeof fun
+            let (T.FunctionType _ (T.Arrow mul) _) = T.typeof fun
             args <- if eager mul
                        then (:[]) <$> forceCompute argVal
-                       else unpackLazy <$> wrapLazy (sizeof (typeof arg)) argVal
+                       else unpackLazy <$> wrapLazy (sizeof (T.typeof arg)) argVal
             resultReg <- Strict <$> newVar
             addInstruction $ IR.Call (Just resultReg) forcedFun (unpackClosure funVal ++ args)
             pure (IR.ValVariable resultReg)
@@ -199,7 +212,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                 unpackClosure (IR.ValVariable v) = [IR.ValVariable v]
                 unpackClosure _ = []
 
-        codegen expr@(Lambda (FunctionType from _ _) mul binding body) = do
+        codegen expr@(T.Lambda (T.FunctionType from _ _) mul binding body) = do
             recs <- asks (^. recursiveBindings)
             let fvs = freeVars recs expr
 
@@ -215,10 +228,10 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                                               oArgV = IR.ValVariable offArg
                                           pure (Just offArg, Lazy lazyArg fArgV oArgV (sizeof from))
 
-            funName <- pushFreshFunction Nothing (catMaybes [clArg, Just funArg, offsetArg])
-            createBlock
+            funName <- pushFunction Nothing (catMaybes [clArg, Just funArg, offsetArg])
+            pushBlock
 
-            boundVars <- unpackPattern (addInstruction $ IR.Throw 1) binding (IR.ValVariable argVar)
+            boundVars <- fst <$> unpackPattern (addInstruction $ IR.Throw 1) binding (IR.ValVariable argVar)
             -- unpackClosure
 
             result <- local (nameMap %~ M.union boundVars) $ codegen body
@@ -226,29 +239,29 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             forced <- forceCompute result
             addInstruction $ IR.Return (Just forced)
 
-            popBlock >>= applyBlock
+            popBlock
             popFunction
             pure (IR.ValClosure (IR.Closure funName Nothing))
             where
-                closureArg :: M.HashMap Identifier Type -> Compiler (Maybe Variable)
+                closureArg :: M.HashMap Identifier T.Type -> Compiler (Maybe Variable)
                 closureArg fvs
                     | M.null fvs = pure Nothing
                     | otherwise = pure (Just (Strict 0))
 
-        codegen (Variable _ name) = asks ((M.! name) . (^. nameMap))
+        codegen (T.Variable _ name) = asks ((M.! name) . (^. nameMap))
         
-        codegen (Literal _ lit) = genLiteral lit
+        codegen (T.Literal _ lit) = genLiteral lit
             where
-                genLiteral :: Literal TypedExpr -> Compiler Value
+                genLiteral :: Literal T.TypedExpr -> Compiler Value
                 genLiteral (IntLiteral i) = pure (IR.ValImmediate (IR.Int64 i))
                 genLiteral (RealLiteral r) = pure (IR.ValImmediate (IR.Real64 r))
                 genLiteral (ListLiteral ls) = undefined
                 genLiteral (TupleLiteral ts) = undefined
 
-        eager :: Multiplicity -> Bool
-        eager mul = P.leq mul (MAtom Relevant) poset
+        eager :: T.Multiplicity -> Bool
+        eager mul = P.leq mul (T.MAtom Relevant) poset
 
-        lazy :: Pattern -> M.HashMap Identifier Type -> Compiler NameMap -> Compiler NameMap
+        lazy :: T.Pattern -> M.HashMap Identifier T.Type -> Compiler NameMap -> Compiler NameMap
         lazy names fvs generator = do
             let fvsList = M.toList fvs
             -- First, we need to allocate memory for the thunk. This will comprise of
@@ -269,7 +282,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             -- Next, we create a new function. This will compute the thunk values when it is
             -- first invoked.
             thunkName <- createFreshThunk name [thunkArg]
-            createBlock
+            pushBlock
             closureVars <- unpackClosure thunkArg fvsList
             -- Now, we run the regular, strict compiler generator for this function.
             -- We have restricted the input to take a generator which returns a mapping
@@ -278,7 +291,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             thunkResult <- local (nameMap %~ M.union closureVars) generator
             variableMap <- writeOutResults thunkReg thunkArg thunkName (M.toList thunkResult)
             addInstruction $ IR.Return Nothing
-            popBlock >>= applyBlock
+            popBlock
             -- Now, we pop the top function on the stack. This function is the thunk
             -- generator.
             popFunction
@@ -286,7 +299,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             where
                 name :: Maybe Identifier
                 name = case names of
-                         (VariablePattern _ n) -> Just n
+                         (T.VariablePattern _ n) -> Just n
                          _ -> Nothing
 
                 (totalPatternSize, patternLayout) =
@@ -318,7 +331,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                                 lazyVar = IR.ValVariable (Lazy lazyVarName (IR.ValClosure closure) (mkInt (fromIntegral offset)) size)
                             M.insert name lazyVar <$> write rest
 
-                packClosure :: Variable -> [(Identifier, Type)] -> Compiler ()
+                packClosure :: Variable -> [(Identifier, T.Type)] -> Compiler ()
                 packClosure _ [] = pure ()
                 packClosure clVar ((name, t):rest) = do
                     let (offset, size) = closureLayout M.! name
@@ -329,7 +342,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                     addInstruction $ IR.Write val (IR.ValVariable addressReg) size
                     packClosure clVar rest
 
-                unpackClosure :: Variable -> [(Identifier, Type)] -> Compiler NameMap
+                unpackClosure :: Variable -> [(Identifier, T.Type)] -> Compiler NameMap
                 unpackClosure _ [] = pure M.empty
                 unpackClosure clVar ((name, t):rest) = do
                     let (offset, size) = closureLayout M.! name
@@ -340,21 +353,21 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                     addInstruction $ IR.Read valReg (IR.ValVariable addressReg) (sizeof t)
                     M.insert name (IR.ValVariable valReg) <$> unpackClosure clVar rest
 
-                computePatternLayout :: Num a => Pattern -> State (a, M.HashMap Identifier (a, a)) ()
-                computePatternLayout (VariablePattern t n) = do
+                computePatternLayout :: Num a => T.Pattern -> State (a, M.HashMap Identifier (a, a)) ()
+                computePatternLayout (T.VariablePattern t n) = do
                     let size = sizeof t
                     offset <- gets fst
                     modify (bimap (+size) (M.insert n (offset, size)))
-                computePatternLayout (ConstructorPattern _ ps) = mapM_ computePatternLayout ps
-                computePatternLayout (LiteralPattern lit) = computeLit lit
+                computePatternLayout (T.ConstructorPattern _ ps) = mapM_ computePatternLayout ps
+                computePatternLayout (T.LiteralPattern lit) = computeLit lit
                     where
-                        computeLit :: Num a => Literal Pattern -> State (a, M.HashMap Identifier (a, a)) ()
+                        computeLit :: Num a => Literal T.Pattern -> State (a, M.HashMap Identifier (a, a)) ()
                         computeLit (IntLiteral _) = pure ()
                         computeLit (RealLiteral _) = pure ()
                         computeLit (ListLiteral ls) = mapM_ computePatternLayout ls
                         computeLit (TupleLiteral ts) = mapM_ computePatternLayout ts
 
-                computeClosureLayout :: Num a => [(Identifier, Type)] -> State (a, M.HashMap Identifier (a, a)) ()
+                computeClosureLayout :: Num a => [(Identifier, T.Type)] -> State (a, M.HashMap Identifier (a, a)) ()
                 computeClosureLayout [] = pure ()
                 computeClosureLayout ((n, t):rest) = do
                     let size = sizeof t
@@ -363,6 +376,11 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
 
         forceCompute :: Value -> Compiler Value
         forceCompute (IR.ValVariable (Lazy _ cl@(IR.ValClosure (IR.Closure _ (Just addr))) offset size)) = do
+            -- We start with a block stack which looks like:
+            --  ... | entry
+            -- So, we begin by editing the entry block, in particular adding code to test this
+            -- thunk
+            -- Note that we cannot add a branch instruction yet, as we have no target block
             let addrVar = IR.ValVariable addr
 
             tag <- Strict <$> newVar
@@ -370,15 +388,26 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             evaluated <- Strict <$> newVar
             addInstruction $ IR.Binop IR.Equal evaluated (IR.ValVariable tag) (IR.ValImmediate (IR.Int64 1))
 
-            entryBlock <- popBlock
+            -- entryBlock <- popBlock
 
-            createBlock
+            -- Now, we wish to push the "force" block - this is responsible for forcing the
+            -- computation:
+            --  ... | entry | force
+            pushBlock
 
             addInstruction $ IR.Call Nothing cl [addrVar]
 
-            forceBlock <- popBlock
+            -- Next, we swap the top blocks. This is to later apply the entry block
+            -- before the force block:
+            --  ... | force | entry
 
-            createBlock
+            swapBlocks
+
+            -- Next, we push the "rest" block. This is the block we wish to be the top of the
+            -- stack upon exit. It also is responsible for unpacking the thunk value:
+            --  ... | force | entry | rest
+            
+            pushBlock
             restLabel <- blockLabel
 
             addressVar <- Strict <$> newVar
@@ -386,9 +415,26 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             computeVar <- Strict <$> newVar
             addInstruction $ IR.Read computeVar (IR.ValVariable addressVar) size
 
-            let branchInstruction = IR.Branch (IR.ValVariable evaluated) restLabel
-            applyBlock $ IR.blockPush branchInstruction entryBlock
-            applyBlock forceBlock
+            -- Now, we swap the top blocks to add the branch instruction to the entry block:
+            --  ... | force | rest | entry
+            -- Note that if we hadn't performed the earlier swap, the entry block would have
+            -- been buried now.
+
+            swapBlocks
+            
+            addInstruction $ IR.Branch (IR.ValVariable evaluated) restLabel
+
+            -- Next, we pop the entry block as it is complete:
+            --  ... | force | rest
+            
+            popBlock
+            
+            -- Then, we wish to apply the force block, so we first swap, then pop:
+            --  ... | rest | force
+            --  ... | rest
+
+            swapBlocks
+            popBlock
 
             pure (IR.ValVariable computeVar)
         forceCompute (IR.ValVariable (Lazy _ addr@(IR.ValVariable {}) offset size)) = do
@@ -397,9 +443,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             evaluated <- Strict <$> newVar
             addInstruction $ IR.Binop IR.Equal evaluated (IR.ValVariable tag) (mkInt 1)
 
-            entryBlock <- popBlock
-
-            createBlock
+            pushBlock
 
             callAddr <- Strict <$> newVar
             addInstruction $ IR.Binop IR.Add callAddr addr (mkInt 1)
@@ -407,9 +451,9 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             addInstruction $ IR.Read call (IR.ValVariable callAddr) pointerSize
             addInstruction $ IR.Call Nothing (IR.ValVariable call) [addr]
 
-            forceBlock <- popBlock
-
-            createBlock
+            swapBlocks
+            pushBlock
+            
             restLabel <- blockLabel
 
             addressVar <- Strict <$> newVar
@@ -417,9 +461,13 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             computeVar <- Strict <$> newVar
             addInstruction $ IR.Read computeVar (IR.ValVariable addressVar) size
 
-            let branchInstruction = IR.Branch (IR.ValVariable evaluated) restLabel
-            applyBlock $ IR.blockPush branchInstruction entryBlock
-            applyBlock forceBlock
+            swapBlocks
+
+            addInstruction $ IR.Branch (IR.ValVariable evaluated) restLabel
+
+            popBlock
+            swapBlocks
+            popBlock
 
             pure (IR.ValVariable computeVar)
         forceCompute (IR.ValVariable (Lazy _ imm _ _)) = pure imm
@@ -438,38 +486,57 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
             lazyVar <- newVar
             pure (IR.ValVariable (Lazy lazyVar (IR.ValVariable baseAddress) (mkInt 1) size))
         
-        makeClosure :: M.HashMap Identifier Type
+        makeClosure :: M.HashMap Identifier T.Type
                     -> Compiler (Maybe Value, Maybe Variable -> Compiler NameMap)
         makeClosure fvs = pure (Nothing, const (pure M.empty))
 
-        unpackPattern :: Compiler () -> Pattern -> Value -> Compiler NameMap
-        unpackPattern _ (VariablePattern t name) var = pure (M.singleton name var)
-        unpackPattern onFail (ConstructorPattern cons args) var = undefined
-        unpackPattern onFail (LiteralPattern lit) var = unpackLit lit
+        unpackPattern :: Compiler a -> T.Pattern -> Value -> Compiler (NameMap, Maybe a)
+        unpackPattern onFail pattern v = do
+            (nameMap, canFail) <- unpack pattern v
+            if canFail
+               then do
+                   pushBlock
+                   failResult <- onFail
+                   popBlock
+                   pure (nameMap, Just failResult)
+               else pure (nameMap, Nothing)
             where
-                unpackLit :: Literal Pattern -> Compiler NameMap
-                unpackLit (IntLiteral i) = do
-                    createBlock
-                    failResult <- onFail
-                    failBlock <- popBlock
-                    cmpVar <- Strict <$> newVar
-                    addInstruction $ IR.Binop IR.Equal cmpVar var (mkInt i)
-                    entryBlock <- popBlock
-                    createBlock
-                    restLabel <- blockLabel
-                    let branchInstruction = IR.Branch (IR.ValVariable cmpVar) restLabel
-                    applyBlock $ IR.blockPush branchInstruction entryBlock
-                    applyBlock failBlock
-                    pure M.empty
-                unpackLit (RealLiteral r) = undefined
-                unpackLit (ListLiteral ls) = undefined
-                unpackLit (TupleLiteral ts) = undefined
+                unpack :: T.Pattern -> Value -> Compiler (NameMap, Bool)
+                unpack (T.VariablePattern t name) var = pure (M.singleton name var, False)
+                unpack (T.ConstructorPattern cons args) var = undefined
+                unpack (T.LiteralPattern lit) var = unpackLit lit >>= (\nm -> pure (nm, True))
+                    where
+                        unpackLit :: Literal T.Pattern -> Compiler NameMap
+                        unpackLit (IntLiteral i) = do
+                            -- Entry:
+                            --  ... | entry
+                            -- First, push the "rest" block:
+                            --  ... | entry | rest
+                            pushBlock
+                            restLabel <- blockLabel
+
+                            -- Now, swap so entry is on top:
+                            --  ... | rest | entry
+                            swapBlocks
+                            cmpVar <- Strict <$> newVar
+                            addInstruction $ IR.Binop IR.Equal cmpVar var (mkInt i)
+                            addInstruction $ IR.Branch (IR.ValVariable cmpVar) restLabel
+
+                            -- Then, pop the entry block:
+                            --  ... | rest
+                            popBlock
+
+                            -- We don't bind any vars in a literal pattern
+                            pure M.empty
+                        unpackLit (RealLiteral r) = undefined
+                        unpackLit (ListLiteral ls) = undefined
+                        unpackLit (TupleLiteral ts) = undefined
 
         createFreshThunk :: Maybe Identifier -> [Variable] -> Compiler IR.FunctionID
         createFreshThunk = addFunctionToStack thunkNames
 
-        pushFreshFunction :: Maybe Identifier -> [Variable] -> Compiler IR.FunctionID
-        pushFreshFunction = addFunctionToStack functionNames
+        pushFunction :: Maybe Identifier -> [Variable] -> Compiler IR.FunctionID
+        pushFunction = addFunctionToStack functionNames
 
         addFunctionToStack :: Lens' CompileState (Stream.Stream IR.FunctionID) -> Maybe Identifier
                            -> [Variable]
@@ -495,24 +562,28 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                 uncons :: [a] -> (a, [a])
                 uncons (x:xs) = (x, xs)
 
-        createBlock :: Compiler ()
-        createBlock = do
+        pushBlock :: Compiler ()
+        pushBlock = do
             blockId <- popName blockNames
             let block = IR.makeBasicBlock blockId
             modify (blockStack %~ (block:))
 
-        popBlock :: Compiler BasicBlock
+        popBlock :: Compiler ()
         popBlock = do
             (blk, rest) <- gets (uncons . (^. blockStack))
-            modify (blockStack .~ rest)
-            pure blk
+            modify ( (blockStack .~ rest)
+                   . (funcStack . ix 0 . IR.blocks %~ (:|> blk))
+                   )
             where
                 uncons :: [a] -> (a, [a])
                 uncons (x:xs) = (x, xs)
 
-        applyBlock :: BasicBlock -> Compiler ()
-        applyBlock blk = do
-            modify (funcStack . ix 0 . IR.blocks %~ (:|> blk))
+        swapBlocks :: Compiler ()
+        swapBlocks = do
+            blks <- gets (^. blockStack)
+            case blks of
+              (b0:b1:rest) -> modify (blockStack .~ b1:b0:rest)
+              _ -> pure ()
 
         blockLabel :: Compiler IR.Label
         blockLabel = gets (^. blockStack . ix 0 . IR.label)
@@ -556,7 +627,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
 
 testEverything2 :: String -> IO ()
 testEverything2 s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
-                     Left (e, tvm) -> putStrLn (showError s tvm e)
+                     Left (e, tvm) -> putStrLn (T.showError s tvm e)
                      Right (t, p) -> print (compile t p ^. compiledProgram)
     where
         fromRight (Right x) = x

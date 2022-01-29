@@ -22,6 +22,7 @@ import qualified Data.HashSet as S
 
 -- TODO: REMOVE
 import qualified Data.DisjointSet as DS
+import Debug.Trace
 
 -- type RemapperState a = StateT (M.HashMap Identifier TypeVar) CheckerState a
 
@@ -203,11 +204,12 @@ typecheck' ctx (L _ (VEApp fun arg)) = do
 
     returnType <- freshPolyType
     unify (location fun) (typeof typedFun) (FunctionType (typeof typedArg) (Arrow funMul) returnType)
-    pure (Application returnType typedFun typedArg)
+    retTypeRep <- typeRepresentative returnType
+    pure (Application retTypeRep typedFun typedArg)
     where
         unpackFunMul :: Type -> Checker Multiplicity
         unpackFunMul (FunctionType _ (Arrow m) _) = pure m
-        unpackFunMul _ = freshPolyMul
+        unpackFunMul _ = pure (MAtom Normal)
 
 typecheck' ctx (L _ (VELambda (L _ ann@(Annotated pattern patType)) (L _ (ArrowExpr arrow)) body)) = do
     argType <- annotationToType ann

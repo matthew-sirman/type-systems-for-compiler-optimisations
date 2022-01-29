@@ -30,7 +30,7 @@ import Data.Maybe (fromJust)
 %error { parseError }
 %monad { Alex }
 %lexer { lexer } { L _ TokEOF }
-%expect 17
+%expect 21
 
 %token
     let                 { L _ KWlet }
@@ -99,8 +99,8 @@ stmts :: { [Loc Statement] }
 
 stmt :: { Loc Statement }
     : lvar ':' type ';;'                                { loc (TypeDecl (idTok $1) $3) $1 $> }
-    | lvar '=' expr ';;'                                { loc (FuncDecl (idTok $1) $3) $1 $> }
-    | lvar pattern_list '=' expr ';;'                   { loc (makeFuncDecl (idTok $1) $2 $4) $1 $> }
+    {- | lvar '=' expr ';;'                                { loc (FuncDecl (idTok $1) $3) $1 $> } -}
+    | lvar seq(pattern) '=' expr ';;'                   { loc (makeFuncDecl (idTok $1) $2 $4) $1 $> }
     | datatype ';;'                                     { loc (TypeDef $1) $1 $> }
 
 expr :: { Loc ValExpr }
@@ -170,7 +170,8 @@ let_binding_list :: { [Loc LetBinding] }
     | let_binding_list and let_binding                  { $3 : $1 }
 
 let_binding :: { Loc LetBinding }
-    : maybe(multiplicity) annotated(pattern) '=' expr   { makeLetBinding $1 $2 $4 }
+    : maybe(multiplicity) annotated(pattern)
+        seq(pattern) '=' expr                           { makeLetBinding $1 $2 (transformLambdas $5 $3) }
 
 annotated(p)
     : p                                                 { loc (Annotated $1 Nothing) $1 $> }
@@ -190,7 +191,7 @@ pattern_list :: { [Loc SourcePattern] }
 
 pattern :: { Loc SourcePattern }
     : uvar                                              { loc (ConsPattern (rawId $1) []) $1 $> }
-    | '(' uvar pattern_list ')'                         { loc (ConsPattern (rawId $2) $3) $1 $> }
+    | '(' uvar pattern seq(pattern) ')'                 { loc (ConsPattern (rawId $2) ($3:$4)) $1 $> }
     | '(' pattern '::' pattern ')'                      { loc (ConsPattern (I "::") [$2, $4]) $1 $> }
     | pattern_atom                                      { $1 }
 
@@ -265,11 +266,11 @@ realTok :: Loc Token -> Double
 realTok (L _ (TokRealLit r)) = r
 
 makeFuncDecl :: Loc Identifier -> [Loc SourcePattern] -> Loc ValExpr -> Statement
-makeFuncDecl name patterns expr = FuncDecl name (transformLambdas patterns)
-    where
-        transformLambdas :: [Loc SourcePattern] -> Loc ValExpr
-        transformLambdas [] = expr
-        transformLambdas (p@(L sl _):ps) = L sl $ VELambda (L sl (Annotated p Nothing)) (L sl (ArrowExpr Nothing)) (transformLambdas ps)
+makeFuncDecl name patterns expr = FuncDecl name (transformLambdas expr patterns)
+
+transformLambdas :: Loc ValExpr -> [Loc SourcePattern] -> Loc ValExpr
+transformLambdas base [] = base
+transformLambdas base (p@(L sl _):ps) = L sl $ VELambda (L sl (Annotated p Nothing)) (L sl (ArrowExpr Nothing)) (transformLambdas base ps)
 
 makeTypeDef :: Loc Token -> Loc Identifier -> [Loc Identifier] -> [Loc Identifier] -> [Loc (Annotated Identifier)] -> Loc TypeDefinition
 makeTypeDef start name pVars mVars cs

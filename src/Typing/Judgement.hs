@@ -272,7 +272,7 @@ annotationToType (Annotated _ Nothing) = freshPolyType
 annotationToType (Annotated _ (Just t)) = createTypeFor (syntax t)
 
 annotationToMultiplicity :: Maybe (Loc MultiplicityExpr) -> Checker Multiplicity
-annotationToMultiplicity Nothing = freshPolyMul
+annotationToMultiplicity Nothing = pure (MAtom Normal) -- freshPolyMul
 annotationToMultiplicity (Just mul) = createMulFor (syntax mul)
 
 createTermFor :: Loc Identifier -> Checker TermVar
