@@ -20,12 +20,10 @@ import Control.Monad.State
 
 data Register
     = Reg Word64
-    | ArgReg Word64
     | ReturnReg
 
 instance Show Register where
     show (Reg r) = "r" ++ show r
-    show (ArgReg a) = "arg" ++ show a
     show ReturnReg = "ret_reg"
 
 data BytecodeValue
@@ -53,6 +51,8 @@ data BytecodeInstruction hole
     | Jump hole
     | Call (CallTarget hole)
     | Return
+    | Push BytecodeValue
+    | Pop Register
     | Throw Int
 
 instance Show hole => Show (BytecodeInstruction hole) where

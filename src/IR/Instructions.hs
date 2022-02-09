@@ -34,22 +34,15 @@ instance Show Immediate where
     show (Bool b) = "i1 " ++ if b then "1" else "0"
     show Unit = "unit ()"
 
-data Closure r
-    = Closure FunctionID (Maybe r)
-
-instance Show r => Show (Closure r) where
-    show (Closure func Nothing) = show func
-    show (Closure func (Just v)) = show func ++ "(cl: " ++ show v ++ ")"
-
 data Value r
     = ValImmediate Immediate
     | ValVariable r
-    | ValClosure (Closure r)
+    | ValFunction FunctionID
 
 instance Show r => Show (Value r) where
     show (ValImmediate i) = show i
     show (ValVariable r) = show r
-    show (ValClosure cl) = show cl
+    show (ValFunction fn) = "&" ++ show fn
 
 newtype PhiNode r = PhiNode (Value r, Label)
 

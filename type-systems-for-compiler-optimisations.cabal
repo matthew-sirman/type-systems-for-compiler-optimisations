@@ -31,6 +31,7 @@ library
       Compiler.Bytecode
       Compiler.Compiler
       Compiler.Size
+      Compiler.Translate
       Interpreter.Interpreter
       IR.BasicBlock
       IR.Function

@@ -3,8 +3,9 @@ module Compiler.Size where
 import Parser.AST (Identifier(..))
 import Typing.Types
 
-pointerSize :: Num a => a
+pointerSize, labelSize :: Num a => a
 pointerSize = 8
+labelSize = 8
 
 int64Size, realSize, unitSize, boolSize :: Num a => a
 int64Size = 8
