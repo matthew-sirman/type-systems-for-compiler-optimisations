@@ -27,5 +27,5 @@ sizeof (TypeApp _ _) = undefined
 -- TODO: Handle function data properly (maybe this will actually
 --      need to store a closure?)
 sizeof (FunctionType {}) = pointerSize
-sizeof (TupleType ts) = sum (map sizeof ts)
+sizeof (TupleType ts) = pointerSize
 

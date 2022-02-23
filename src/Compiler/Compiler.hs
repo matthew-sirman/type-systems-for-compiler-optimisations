@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, RankNTypes, TupleSections #-}
+{-# LANGUAGE TemplateHaskell, RankNTypes, TupleSections, DeriveGeneric #-}
 module Compiler.Compiler where
 
 import qualified Parser.AST as AST (MultiplicityAtom(..), Identifier(..), Literal(..))
@@ -35,6 +35,9 @@ import Control.Monad.State
 import Control.Monad.Reader
 import Control.Lens hiding (Strict, Lazy)
 
+import GHC.Generics
+import Data.Hashable (Hashable)
+
 -- TODO: Remove
 import Typing.Checker
 import Parser.Parser
@@ -55,12 +58,15 @@ data Variable
     | Lazy Integer Word64
     | StrictArgument Integer
     | LazyArgument Integer Word64
+    deriving (Eq, Generic)
 
 instance Show Variable where
     show (Strict var) = "tmp" ++ show var
     show (Lazy var _) = "lzy" ++ show var
     show (StrictArgument arg) = "arg" ++ show arg
     show (LazyArgument arg _) = "lzy_arg" ++ show arg
+
+instance Hashable Variable
 
 data CompileState = CompileState
     { _blockStack :: [BasicBlock]
@@ -82,59 +88,10 @@ data CompilerInfo = CompilerInfo
 
 makeLenses ''CompilerInfo
 
--- TODO: Think about making a less conservative approach for capturing free vars
--- For example:
--- In the expression
---  \x -> let y = 0 and z = y + 1 in z
--- the thunk computing 'z' does not need to capture 'y'
--- However, in the expression
---  \x -> let y = x + 1 and z = y + 1 in z
--- the thunk for 'z' does need to capture 'y', as 'y' depends on 'x' which is free.
---
--- So, as of now, 'y' is captured conservatively in both cases.
--- freeVars :: S.HashSet Identifier -> CodegenExpr -> M.HashMap Identifier Type
--- freeVars ignore (Let bindings body) =
---     let extractNames (_, pattern, _) = namesInBinding pattern
---         allNames = S.union ignore (foldMap extractNames bindings)
---         
---         bindingFVs (_, _, binding) = freeVars allNames binding
---      in M.union (freeVars allNames body) (foldMap bindingFVs bindings)
--- freeVars ignore (Case disc branches) = M.union (freeVars ignore disc) (foldMap branchFVs branches)
---     where
---         branchFVs :: (Pattern, CodegenExpr) -> M.HashMap Identifier Type
---         branchFVs (pattern, body) = freeVars (S.union ignore (namesInBinding pattern)) body
--- freeVars ignore (Lambda args body) =
---     freeVars (S.unions (ignore : map (namesInBinding . \(_, _, x) -> x) args)) body
--- freeVars ignore (Application fun args) =
---     M.unions (freeVars ignore fun : map (freeVars ignore . \(_, _, x) -> x) args)
--- freeVars ignore (PrimApp _ args) = M.unions (map (freeVars ignore) args)
--- freeVars ignore (ConsApp _ args) = M.unions (map (freeVars ignore . snd) args)
--- freeVars ignore (Variable t name)
---     | S.member name ignore = M.empty
---     | otherwise = M.singleton name t
--- freeVars ignore (Literal lit) = litFVs lit
---     where
---         litFVs :: Literal CodegenExpr -> M.HashMap Identifier Type
---         litFVs (IntLiteral _) = M.empty
---         litFVs (RealLiteral _) = M.empty
---         litFVs (ListLiteral ls) = foldMap (freeVars ignore) ls
---         litFVs (TupleLiteral ts) = foldMap (freeVars ignore) ts
--- 
--- namesInBinding :: Pattern -> S.HashSet Identifier
--- namesInBinding (VariablePattern _ name) = S.singleton name
--- namesInBinding (ConstructorPattern _ ps) = foldMap namesInBinding ps
--- namesInBinding (LiteralPattern lit) = namesInLiteral lit
---     where
---         namesInLiteral :: Literal Pattern -> S.HashSet Identifier
---         namesInLiteral (IntLiteral _) = S.empty
---         namesInLiteral (RealLiteral _) = S.empty
---         namesInLiteral (ListLiteral ls) = foldMap namesInBinding ls
---         namesInLiteral (TupleLiteral ts) = foldMap namesInBinding ts
-
 type Compiler a = ReaderT CompilerInfo (State CompileState) a
 
-compile :: T.TypedExpr -> T.MultiplicityPoset -> CompileState
-compile expr poset = execState (runReaderT finalise startInfo) startState
+compile :: T.TypedExpr -> T.MultiplicityPoset -> Program
+compile expr poset = execState (runReaderT finalise startInfo) startState ^. compiledProgram
     where
         finalise :: Compiler ()
         finalise = do
@@ -303,18 +260,26 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
         codegen (Case disc branches) = do
             discVal <- codegen disc
             forcedDisc <- forceCompute discVal
-            phiNodes <- genBranches forcedDisc (toList branches)
-            result <- Strict <$> newVar
-            addInstruction $ IR.Phi result phiNodes
-            pure (IR.ValVariable result)
+            pushBlock
+            restLabel <- blockLabel
+            swapBlocks
+            phiNodes <- genBranches restLabel forcedDisc (toList branches)
+            popBlock
+            case phiNodes of
+              [IR.PhiNode (nodeVal, _)] -> pure nodeVal
+              _ -> do
+                  result <- Strict <$> newVar
+                  addInstruction $ IR.Phi result phiNodes
+                  pure (IR.ValVariable result)
             where
-                genBranches :: Value -> [Alternative] -> Compiler [PhiNode]
-                genBranches _ [] = do
+                genBranches :: IR.Label -> Value -> [Alternative] -> Compiler [PhiNode]
+                genBranches _ _ [] = do
                     addInstruction $ IR.Throw 1
                     pure []
-                genBranches var (Alt pattern expr:rest) = do
-                    (names, fail) <- unpackPattern (genBranches var rest) pattern var
+                genBranches successLabel var (Alt pattern expr:rest) = do
+                    (names, fail) <- unpackPattern (genBranches successLabel var rest) pattern var
                     branchVal <- local (nameMap %~ M.union names) $ codegen expr
+                    addInstruction $ IR.Jump successLabel
                     branchLabel <- blockLabel
                     pure (IR.PhiNode (branchVal, branchLabel) : fromMaybe [] fail)
 
@@ -336,75 +301,13 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                 
         codegen (PrimApp fun args) = do
             argVals <- mapM (lookupVar . varID) args
+            forced <- mapM forceCompute argVals
             let iBuilder = B.functions M.! fun
             res <- Strict <$> newVar
-            addInstruction $ iBuilder res argVals
+            addInstruction $ iBuilder res forced
             pure (IR.ValVariable res)
 
         codegen (ConsApp {}) = undefined
-
-        -- codegen (Lambda bindings body) = do
-        --     (vars, functionArgList) <- (concat <$>) . unzip <$> forM bindings (\(mul, t, _) -> do
-        --         arg <- Argument <$> newVar
-        --         if eager mul
-        --            then pure (arg, [arg])
-        --            else do
-        --                offArg <- Argument <$> newVar
-        --                lazyArg <- newVar
-        --                pure ( Lazy lazyArg (IR.ValVariable arg) (IR.ValVariable offArg) (sizeof t)
-        --                     , [arg, offArg]))
-        --     funName <- pushFunction Nothing functionArgList
-        --     pushBlock
-
-        --     boundVars <- foldl (M.unionWith second) M.empty <$> forM (zip bindings vars) 
-        --         (\((_, _, pat), var) ->
-        --             fst <$> unpackPattern (addInstruction $ IR.Throw 1) pat (IR.ValVariable var))
-        --     
-        --     result <- local (nameMap %~ M.union boundVars) $ codegen body
-        --     addInstruction $ IR.Return (Just result)
-
-        --     popBlock
-        --     popFunction
-
-        --     pure (IR.ValClosure (IR.Closure funName Nothing))
-
-        --     -- recs <- asks (^. recursiveBindings)
-        --     -- let fvs = freeVars recs expr
-
-        --     -- clArg <- closureArg fvs
-
-        --     -- funArg <- Argument <$> newVar
-        --     -- (offsetArg, argVar) <- if eager mul
-        --     --                           then pure (Nothing, funArg)
-        --     --                           else do
-        --     --                               offArg <- Argument <$> newVar
-        --     --                               lazyArg <- newVar
-        --     --                               let fArgV = IR.ValVariable funArg
-        --     --                                   oArgV = IR.ValVariable offArg
-        --     --                               pure (Just offArg, Lazy lazyArg fArgV oArgV (sizeof from))
-
-        --     -- funName <- pushFunction Nothing (catMaybes [clArg, Just funArg, offsetArg])
-        --     -- pushBlock
-
-        --     -- boundVars <- fst <$> unpackPattern (addInstruction $ IR.Throw 1) binding (IR.ValVariable argVar)
-        --     -- -- unpackClosure
-
-        --     -- result <- local (nameMap %~ M.union boundVars) $ codegen body
-
-        --     -- forced <- forceCompute result
-        --     -- addInstruction $ IR.Return (Just forced)
-
-        --     -- popBlock
-        --     -- popFunction
-        --     -- pure (IR.ValClosure (IR.Closure funName Nothing))
-        --     where
-        --         closureArg :: M.HashMap Identifier Type -> Compiler (Maybe Variable)
-        --         closureArg fvs
-        --             | M.null fvs = pure Nothing
-        --             | otherwise = pure (Just (Strict 0))
-
-        --         second :: a -> b -> b
-        --         second x y = y
 
         codegen (Variable name) = lookupVar (varID name)
         
@@ -443,122 +346,6 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
         
         lookupVar :: Integer -> Compiler Value
         lookupVar vid = asks ((M.! vid) . (^. nameMap))
-
-        -- eager :: Multiplicity -> Bool
-        -- eager mul = P.leq mul (T.MAtom Relevant) poset
-
-        -- lazy :: Pattern -> M.HashMap Identifier Type -> Compiler NameMap -> Compiler NameMap
-        -- lazy names fvs generator = do
-        --     let fvsList = M.toList fvs
-        --     -- First, we need to allocate memory for the thunk. This will comprise of
-        --     --    - a single byte which will be used to determine whether the value
-        --     --      has already been computer or not. This way, we don't recompute
-        --     --      values
-        --     --    - enough space for each of the types which will be generated based
-        --     --      on the pattern being generated for. E.g., if we have the pattern
-        --     --      "(x, y)", we need to allocate space for the size of "x" and for "y".
-        --     thunkReg <- Strict <$> newVar
-        --     -- Add an instruction to allocate the memory
-        --     addInstruction $ IR.MAlloc thunkReg (mkInt (fromIntegral totalClosureSize))
-        --     addInstruction $ IR.Write (IR.ValImmediate (IR.Int64 0)) (IR.ValVariable thunkReg) 1
-
-        --     packClosure thunkReg fvsList
-
-        --     thunkArg <- Argument <$> newVar
-        --     -- Next, we create a new function. This will compute the thunk values when it is
-        --     -- first invoked.
-        --     thunkName <- createFreshThunk name [thunkArg]
-        --     pushBlock
-        --     closureVars <- unpackClosure thunkArg fvsList
-        --     -- Now, we run the regular, strict compiler generator for this function.
-        --     -- We have restricted the input to take a generator which returns a mapping
-        --     -- from variables in the pattern to values. This is therefore essentially
-        --     -- a generator for computing each value that the pattern unwraps.
-        --     thunkResult <- local (nameMap %~ M.union closureVars) generator
-        --     variableMap <- writeOutResults thunkReg thunkArg thunkName (M.toList thunkResult)
-        --     addInstruction $ IR.Return Nothing
-        --     popBlock
-        --     -- Now, we pop the top function on the stack. This function is the thunk
-        --     -- generator.
-        --     popFunction
-        --     pure variableMap
-        --     where
-        --         name :: Maybe Identifier
-        --         name = case names of
-        --                  (T.VariablePattern _ n) -> Just n
-        --                  _ -> Nothing
-
-        --         (totalPatternSize, patternLayout) =
-        --             execState (computePatternLayout names) (1, M.empty)
-        --         (totalClosureSize, closureLayout) =
-        --             execState (computeClosureLayout (M.toList fvs)) (totalPatternSize, M.empty)
-
-        --         writeOutResults :: Variable -> Variable -> IR.FunctionID -> [(Identifier, Value)]
-        --                         -> Compiler NameMap
-        --         writeOutResults clVar baseAddress thunkName valMap = do
-        --             nameMap <- write valMap
-        --             addInstruction $ IR.Write (mkInt 1) (IR.ValVariable baseAddress) 1
-        --             pure nameMap
-        --             where
-        --                 closure :: Closure
-        --                 closure = IR.Closure thunkName (Just clVar)
-
-        --                 write :: [(Identifier, Value)] -> Compiler NameMap
-        --                 write [] = pure M.empty
-        --                 write ((name, val):rest) = do
-        --                     let (offset, size) = patternLayout M.! name
-        --                         offsetVal = mkInt (fromIntegral offset)
-        --                     addressReg <- Strict <$> newVar
-        --                     addInstruction $ IR.Binop IR.Add addressReg (IR.ValVariable baseAddress) offsetVal
-        --                     -- TODO: This may need to do a copy rather than write
-        --                     addInstruction $ IR.Write val (IR.ValVariable addressReg) size
-        --                     lazyVarName <- newVar
-        --                     let addressVar = IR.ValVariable addressReg
-        --                         lazyVar = IR.ValVariable (Lazy lazyVarName (IR.ValClosure closure) (mkInt (fromIntegral offset)) size)
-        --                     M.insert name lazyVar <$> write rest
-
-        --         packClosure :: Variable -> [(Identifier, Type)] -> Compiler ()
-        --         packClosure _ [] = pure ()
-        --         packClosure clVar ((name, t):rest) = do
-        --             let (offset, size) = closureLayout M.! name
-        --                 offsetVal = IR.ValImmediate (IR.Int64 (fromIntegral offset))
-        --             addressReg <- Strict <$> newVar
-        --             addInstruction $ IR.Binop IR.Add addressReg (IR.ValVariable clVar) offsetVal
-        --             val <- asks ((M.! name) . (^. nameMap))
-        --             addInstruction $ IR.Write val (IR.ValVariable addressReg) size
-        --             packClosure clVar rest
-
-        --         unpackClosure :: Variable -> [(Identifier, Type)] -> Compiler NameMap
-        --         unpackClosure _ [] = pure M.empty
-        --         unpackClosure clVar ((name, t):rest) = do
-        --             let (offset, size) = closureLayout M.! name
-        --                 offsetVal = IR.ValImmediate (IR.Int64 (fromIntegral offset))
-        --             addressReg <- Strict <$> newVar
-        --             addInstruction $ IR.Binop IR.Add addressReg (IR.ValVariable clVar) offsetVal
-        --             valReg <- Strict <$> newVar
-        --             addInstruction $ IR.Read valReg (IR.ValVariable addressReg) (sizeof t)
-        --             M.insert name (IR.ValVariable valReg) <$> unpackClosure clVar rest
-
-        --         computePatternLayout :: Num a => T.Pattern -> State (a, M.HashMap Identifier (a, a)) ()
-        --         computePatternLayout (T.VariablePattern t n) = do
-        --             let size = sizeof t
-        --             offset <- gets fst
-        --             modify (bimap (+size) (M.insert n (offset, size)))
-        --         computePatternLayout (T.ConstructorPattern _ ps) = mapM_ computePatternLayout ps
-        --         computePatternLayout (T.LiteralPattern lit) = computeLit lit
-        --             where
-        --                 computeLit :: Num a => Literal T.Pattern -> State (a, M.HashMap Identifier (a, a)) ()
-        --                 computeLit (IntLiteral _) = pure ()
-        --                 computeLit (RealLiteral _) = pure ()
-        --                 computeLit (ListLiteral ls) = mapM_ computePatternLayout ls
-        --                 computeLit (TupleLiteral ts) = mapM_ computePatternLayout ts
-
-        --         computeClosureLayout :: Num a => [(Identifier, Type)] -> State (a, M.HashMap Identifier (a, a)) ()
-        --         computeClosureLayout [] = pure ()
-        --         computeClosureLayout ((n, t):rest) = do
-        --             let size = sizeof t
-        --             offset <- gets fst
-        --             modify (bimap (+size) (M.insert n (offset, size)))
 
         forceCompute :: Value -> Compiler Value
         forceCompute addr@(IR.ValVariable (Lazy _ sz)) = force addr sz
@@ -617,26 +404,9 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
 
             pure (IR.ValVariable computeVar)
 
-        wrapLazy :: Word64 -> Value -> Compiler Value
-        wrapLazy _ v@(IR.ValVariable (Lazy {})) = pure v
-        wrapLazy _ v@(IR.ValFunction _) = pure v
-        -- wrapLazy size imm = do
-        --     baseAddress <- Strict <$> newVar
-        --     addInstruction $ IR.MAlloc baseAddress (mkInt (fromIntegral (1 + size)))
-        --     addInstruction $ IR.Write (mkInt 1) (IR.ValVariable baseAddress) 1
-        --     valAddress <- Strict <$> newVar
-        --     addInstruction $ IR.Binop IR.Add valAddress (IR.ValVariable baseAddress) (mkInt 1)
-        --     addInstruction $ IR.Write imm (IR.ValVariable valAddress) size
-        --     lazyVar <- newVar
-        --     pure (IR.ValVariable (Lazy lazyVar (IR.ValVariable baseAddress) (mkInt 1) size))
-        
-        -- makeClosure :: M.HashMap Identifier Type
-        --             -> Compiler (Maybe Value, Maybe Variable -> Compiler NameMap)
-        -- makeClosure fvs = pure (Nothing, const (pure M.empty))
-
         unpackPattern :: Compiler a -> Pattern -> Value -> Compiler (NameMap, Maybe a)
         unpackPattern onFail pattern v = do
-            (nameMap, canFail, _) <- unpack pattern v
+            (nameMap, canFail) <- unpack pattern v
             if canFail
                then do
                    pushBlock
@@ -645,29 +415,46 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
                    pure (nameMap, Just failResult)
                else pure (nameMap, Nothing)
             where
-                unpack :: Pattern -> Value -> Compiler (NameMap, Bool, Word64)
+                unpack :: Pattern -> Value -> Compiler (NameMap, Bool)
                 unpack (VarPattern name) var =
-                    pure (M.singleton (varID name) var, False, fromIntegral (varSize name))
+                    pure (M.singleton (varID name) var, False)
                 unpack (ConsPattern cons args) var = undefined
                 unpack (LiteralPattern lit) var = unpackLit lit
                     where
-                        unpackLit :: AST.Literal Pattern -> Compiler (NameMap, Bool, Word64)
+                        unpackLit :: AST.Literal Pattern -> Compiler (NameMap, Bool)
                         unpackLit (AST.IntLiteral i) =
-                            (, True, 0) <$> literalMatcher (mkInt i)
+                            (, True) <$> literalMatcher (mkInt i)
                         unpackLit (AST.RealLiteral r) =
-                            (, True, 0) <$> literalMatcher (IR.ValImmediate (IR.Real64 r))
+                            (, True) <$> literalMatcher (IR.ValImmediate (IR.Real64 r))
                         unpackLit (AST.ListLiteral ls) = undefined
                         unpackLit (AST.TupleLiteral ts) = unpackTuple ts var
                             where
-                                unpackTuple :: [Pattern] -> Value -> Compiler (NameMap, Bool, Word64)
-                                unpackTuple [] _ = pure (M.empty, False, 0)
+                                unpackTuple :: [Pattern] -> Value -> Compiler (NameMap, Bool)
+                                unpackTuple [] _ = pure (M.empty, False)
                                 unpackTuple [p] addr = do
-                                    unpack p addr
+                                    let pSize = patternSize p
+                                    val <- Strict <$> newVar
+                                    addInstruction $ IR.Read val addr pSize
+                                    unpack p (IR.ValVariable val)
                                 unpackTuple (p:ps) addr = do
-                                    (names, refutable, pSize) <- unpack p addr
+                                    let pSize = patternSize p
+                                    val <- Strict <$> newVar
+                                    addInstruction $ IR.Read val addr pSize
+                                    (names, refutable) <- unpack p (IR.ValVariable val)
                                     next <- createAddition addr (mkInt pSize)
-                                    (names', refutable', restSize) <- unpackTuple ps (IR.ValVariable next)
-                                    pure (M.union names names', refutable || refutable', pSize + restSize)
+                                    (names', refutable') <- unpackTuple ps (IR.ValVariable next)
+                                    pure (M.union names names', refutable || refutable')
+
+                        patternSize :: Pattern -> Word64
+                        patternSize (VarPattern v) = fromIntegral (varSize v)
+                        patternSize (ConsPattern _ _) = undefined
+                        patternSize (LiteralPattern lit) = litSize lit
+                            where
+                                litSize :: AST.Literal Pattern -> Word64
+                                litSize (AST.IntLiteral _) = int64Size
+                                litSize (AST.RealLiteral _) = realSize
+                                litSize (AST.ListLiteral _) = undefined
+                                litSize (AST.TupleLiteral _) = pointerSize
 
                         literalMatcher :: Value -> Compiler NameMap
                         literalMatcher checkValue = do
@@ -797,11 +584,11 @@ compile expr poset = execState (runReaderT finalise startInfo) startState
 testEverything2 :: String -> IO ()
 testEverything2 s = case typecheck Builtin.Builtin.defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (T.showError s tvm e)
-                     Right (t, p) -> print (compile t p ^. compiledProgram)
+                     Right (t, p) -> print (compile t p) 
     where
         fromRight (Right x) = x
 
-testCompile :: String -> CompileState
+testCompile :: String -> Program
 testCompile s =
     let (Right parsed) = test_parseExpr s
         (Right (typed, poset)) = typecheck Builtin.Builtin.defaultBuiltins parsed

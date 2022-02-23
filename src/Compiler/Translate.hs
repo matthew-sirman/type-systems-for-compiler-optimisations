@@ -232,8 +232,9 @@ convertAST expr poset =
                               let packer = PackedTuple varsInPattern
                               (Lf clVars sz fnArgs e) <- collectLambdas nm expr
                               let transform = Case e (NE.singleton (Alt pat packer))
-                              let bind = LazyBinding Nothing nm (Lf clVars sz fnArgs transform)
-                              let projectors = makeProjectors 0 varsInPattern
+                                  bind = LazyBinding Nothing nm (Lf clVars sz fnArgs transform)
+                                  projectors = makeProjectors 0 varsInPattern
+
                                   makeProjectors :: Int -> [Var] -> [Binding]
                                   makeProjectors _ [] = binds
                                   makeProjectors p (v@(V sz _):rest) = binder : r
@@ -363,7 +364,7 @@ convertAST expr poset =
                             T.Lambda _ _ (T.VariablePattern _ name) body ->
                                 local (idMap %~ M.insert name varName) $ collectLambdas' 1 [] body
                             T.Lambda _ mul pattern body -> collectLambdas' 1 [(varName, pattern, mul)] body
-            fvs <- local (bound %~ S.insert varName) $ findFVs expr
+            fvs <- local (bound %~ S.union (S.fromList (varName:map snd vs))) $ findFVs expr
             pure (Lf (S.toList fvs) Nothing ((isEager mul, varName):vs) expr)
             where
                 collectLambdas' :: Int -> [(Var, T.Pattern, Multiplicity)] -> T.TypedExpr

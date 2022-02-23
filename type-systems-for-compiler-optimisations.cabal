@@ -30,9 +30,12 @@ library
       Builtin.Types
       Compiler.Bytecode
       Compiler.Compiler
+      Compiler.RegisterAllocator
       Compiler.Size
       Compiler.Translate
       Interpreter.Interpreter
+      IR.Analysis.FlowGraph
+      IR.Analysis.LiveVariableAnalysis
       IR.BasicBlock
       IR.Function
       IR.Instructions
