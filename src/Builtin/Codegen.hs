@@ -1,11 +1,15 @@
+{-# LANGUAGE RankNTypes #-}
 module Builtin.Codegen where
 
 import Parser.AST (Identifier(..))
 import qualified IR.Instructions as IR
+import qualified IR.InstructionBuilder as IR
+import qualified IR.DataType as IR
 
 import qualified Data.HashMap.Strict as M
 
-type PrimitiveFunction r = r -> [IR.Value r] -> IR.Instruction r
+newtype PrimitiveFunction r = PrimitiveFunction
+    { mkPrim :: forall m. IR.MonadIRBuilder r m => m r -> [IR.Value r] -> m (IR.Value r) }
 
 functions :: M.HashMap Identifier (PrimitiveFunction r)
 functions = M.fromList
@@ -34,8 +38,17 @@ funcAdd          = (I "+", binopFunction IR.Add)
 funcSub          = (I "-", binopFunction IR.Sub)
 funcMul          = (I "*", binopFunction IR.Mul)
 funcDiv          = (I "/", binopFunction IR.Div)
-funcUndefined    = (I "undefined", \_ _ -> IR.Throw 2)
+funcUndefined    = (I "undefined", undefinedGen)
 
 binopFunction :: IR.BinaryOperator -> PrimitiveFunction r
-binopFunction op res [lhs, rhs] = IR.Binop op res lhs rhs
+binopFunction op = PrimitiveFunction $ \getReg [lhs, rhs] ->
+    IR.binop op getReg lhs rhs
+
+undefinedGen :: PrimitiveFunction r
+undefinedGen = PrimitiveFunction $ \_ _ -> do
+    IR.throw 2
+    pure (IR.ValImmediate IR.Unit)
+
+thunkTagStruct :: IR.Struct
+thunkTagStruct = IR.Struct "thunk_tag" [IR.FirstOrder IR.Int1T] True
 

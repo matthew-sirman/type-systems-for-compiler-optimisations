@@ -196,9 +196,8 @@ contextLookup ctx loc name = do
             -- context, then throw
             isAffine <- checkInSet termVar affineVars
             when (isAffine && not (P.maybeLeq mul Affine mulRel)) $ typeError $ ContextAffinityViolation loc name
-            -- If the variable is relevant, but relevant variables cannot be used, then throw
+
             isRelevant <- checkInSet termVar relevantVars
-            when (isRelevant && not (P.maybeLeq mul Relevant mulRel)) $ typeError $ ContextRelevancyViolation loc name
 
             -- Now we consume the variable, as it has passed the checks
             -- We actually don't logically need to check for the deletions if they are in
@@ -211,7 +210,10 @@ contextLookup ctx loc name = do
             -- When a relevant variable is consumed, then the relevancy constraint has been satisfied
             -- so we can drop the constraint and treat it as a normal variable (unless it was linear,
             -- in which case it will be zeroed)
-            when isRelevant $ modify (varFrame . relevantVars %~ S.delete termVar)
+            -- If, however, the context it was used in was not guaranteed to use the variable (e.g.
+            -- calling an affine function with it) then we don't drop the constraint.
+            when (isRelevant && P.maybeLeq mul Relevant mulRel) $
+                modify (varFrame . relevantVars %~ S.delete termVar)
             -- If we have consumed an affine variable, it can no longer be used, so we emplace it in
             -- the zero set.
             when isAffine $ modify (varFrame . zeroVars %~ S.insert termVar)

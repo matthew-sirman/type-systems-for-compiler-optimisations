@@ -1,4 +1,10 @@
-{-# LANGUAGE TemplateHaskell, RankNTypes, TupleSections, DeriveGeneric #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 module Compiler.Compiler where
 
 import qualified Parser.AST as AST (MultiplicityAtom(..), Identifier(..), Literal(..))
@@ -13,21 +19,24 @@ import qualified Typing.Types as T
 import qualified Util.BoundedPoset as P
 import qualified Util.Stream as Stream
 
-import Compiler.Size
 import Compiler.Translate
 
 import qualified IR.Instructions as IR
 import qualified IR.BasicBlock as IR
 import qualified IR.Function as IR
 import qualified IR.Program as IR
+import qualified IR.DataType as IR
+import IR.InstructionBuilder
 
 import qualified Builtin.Codegen as B
 
+import Prelude hiding (read)
+
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
-import Data.Sequence as Seq hiding (zip, unzip)
+import Data.Sequence as Seq hiding (zip, zipWith, unzip)
 import Data.Bifunctor (bimap)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, fromJust)
 import Data.Word
 import Data.Foldable (toList)
 import qualified Data.List.NonEmpty as NE
@@ -36,7 +45,7 @@ import Control.Monad.Reader
 import Control.Lens hiding (Strict, Lazy)
 
 import GHC.Generics
-import Data.Hashable (Hashable)
+import Data.Hashable (Hashable(..))
 
 -- TODO: Remove
 import Typing.Checker
@@ -53,20 +62,27 @@ type Program = IR.Program Variable
 
 type NameMap = M.HashMap Integer Value
 
+data Evaluation
+    = Strict
+    | Lazy
+    deriving (Eq, Generic)
+
+instance Hashable Evaluation
+
 data Variable
-    = Strict Integer
-    | Lazy Integer Word64
-    | StrictArgument Integer
-    | LazyArgument Integer Word64
+    = Variable Evaluation Integer
+    | Argument Evaluation Integer
     deriving (Eq, Generic)
 
 instance Show Variable where
-    show (Strict var) = "tmp" ++ show var
-    show (Lazy var _) = "lzy" ++ show var
-    show (StrictArgument arg) = "arg" ++ show arg
-    show (LazyArgument arg _) = "lzy_arg" ++ show arg
+    show (Variable _ var) = "%tmp" ++ show var
+    show (Argument _ arg) = "%arg" ++ show arg
 
-instance Hashable Variable
+instance Hashable Variable where
+    hashWithSalt salt (Variable _ var) = hashWithSalt salt var
+    hashWithSalt salt (Argument _ var) = hashWithSalt salt var
+    hash (Variable _ var) = hash var
+    hash (Argument _ var) = hash var
 
 data CompileState = CompileState
     { _blockStack :: [BasicBlock]
@@ -88,10 +104,14 @@ data CompilerInfo = CompilerInfo
 
 makeLenses ''CompilerInfo
 
-type Compiler a = ReaderT CompilerInfo (State CompileState) a
+newtype Compiler a = Compiler { runCompiler :: ReaderT CompilerInfo (State CompileState) a }
+    deriving (Functor, Applicative, Monad, MonadState CompileState, MonadReader CompilerInfo)
+
+instance MonadIRBuilder Variable Compiler where
+    addInstruction i = modify (blockStack . ix 0 . IR.iList %~ (:|> i))
 
 compile :: T.TypedExpr -> T.MultiplicityPoset -> Program
-compile expr poset = execState (runReaderT finalise startInfo) startState ^. compiledProgram
+compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) startState ^. compiledProgram
     where
         finalise :: Compiler ()
         finalise = do
@@ -99,42 +119,46 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
             pushBlock
             programResult <- codegen (convertAST expr poset)
             forced <- forceCompute programResult
-            addInstruction $ IR.Return (Just forced)
+            ret (Just forced)
             popBlock
             void popFunction
 
         codegen :: CodegenExpr -> Compiler Value
         codegen (Let bindings body) = do
-            boundVars <- M.unions <$> mapM genBinding bindings
+            boundVars <- M.fromList <$> mapM genBinding bindings
             local (nameMap %~ M.union boundVars) $ codegen body
             where
-                genBinding :: Binding -> Compiler NameMap
-                genBinding (LazyBinding name var (Lf captures (Just resSize) [] body)) = do
-                    let thunkSize = 1 + labelSize + sum (map varSize captures)
-                    thunkReg <- Lazy <$> newVar <*> pure (fromIntegral resSize)
-                    let thunkVar = IR.ValVariable thunkReg
+                genBinding :: Binding -> Compiler (Integer, Value)
+                genBinding (LazyBinding name var (Lf captures [] body)) = do
+                    let thunkType = IR.Structure 
+                                        ( IR.NamedStruct B.thunkTagStruct
+                                        : thunkFunc []
+                                        : map varType captures
+                                        )
+
+                    thunkReg <- mkVar Strict
 
                     -- Create the new thunk function - note that this doesn't affect
                     -- the block we are creating at this point, so instructions will
                     -- still be added to the entry block!
                     -- We do this to get the name of thunk.
-                    thunkArg <- StrictArgument <$> newVar
-                    thunkName <- createFreshThunk name [thunkArg]
-                    let thunkNameValue = IR.ValFunction thunkName
-                        thunkArgVar = IR.ValVariable thunkArg
+                    thunkArgReg <- mkArg Lazy
+                    let thunkArg = IR.ValVariable (varType var) thunkArgReg
+                    thunkName <- createFreshThunk name [thunkArgReg]
 
                     -- Add an instruction to allocate the memory
-                    -- Then write a 0 tag to indicate that the thunk has not
+                    -- Write a tag to indicate that the thunk has not
                     -- been evaluated
-                    -- Then write the function address
-                    addInstruction $ IR.MAlloc thunkReg (mkInt thunkSize)
-                    addInstruction $ IR.Write (mkInt 0) thunkVar 1
-                    functionAddress <- IR.ValVariable <$> createAddition thunkVar (mkInt 1)
-                    addInstruction $ IR.Write thunkNameValue functionAddress labelSize
-                    closureWriter <- createAddition functionAddress (mkInt labelSize)
-
+                    -- Write the function address
                     -- Write the captured variables into the closure
-                    packClosure captures closureWriter
+                    thunkVar <- malloc (pure thunkReg) thunkType
+                    tagPtr <- getElementPtr (mkVar Strict) thunkVar [0, 0]
+                    write (mkInt1 False) tagPtr
+                    thunkPtr <- getElementPtr (mkVar Strict) thunkVar [1]
+                    write (IR.ValFunction (thunkFunc []) thunkName) thunkPtr
+                    zipWithM_ (writeCapture thunkVar) captures [2..]
+
+                    thunkObject <- bitcast (mkVar Lazy) thunkVar (varType var)
 
                     ----- THUNK -----
 
@@ -142,239 +166,230 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
                     pushBlock
 
                     -- Unpack the captured variabes from the closure
-                    captureStart <- Strict <$> newVar
-                    addInstruction $ IR.Binop IR.Add captureStart thunkArgVar (mkInt (1 + labelSize))
-                    closureVars <- unpackClosure captures captureStart
+                    thunkArgCast <- bitcast (mkVar Strict) thunkArg (IR.Pointer thunkType)
+                    closureVars <- M.fromList <$> zipWithM (readCapture thunkArgCast) captures [2..]
 
                     -- Now, we run the regular, strict code generator for the body.
                     thunkResult <- local ( (nameMap %~ M.union closureVars)
-                                         . (nameMap %~ M.insert (varID var) thunkArgVar)
+                                         . (nameMap %~ M.insert (varID var) thunkArg)
                                          ) $ codegen body
+
                     -- Overwrite the thunk
-                    addInstruction $ IR.Write (mkInt 1) thunkArgVar 1
-                    writebackAddress <- IR.ValVariable <$> createAddition thunkArgVar (mkInt 1)
-                    addInstruction $ IR.Write thunkResult writebackAddress (fromIntegral resSize)
-                    addInstruction $ IR.Return Nothing
+                    tagPtr <- getElementPtr (mkVar Strict) thunkArg [0, 0]
+                    write (mkInt1 True) tagPtr
+
+                    writebackAddr <- getElementPtr (mkVar Strict) thunkArg [1]
+                    write thunkResult writebackAddr
+
+                    ret Nothing
                     popBlock
                     -- Now, we pop the top function on the stack. This function is the thunk
                     -- generator.
                     popFunction
-                    pure (M.singleton (varID var) thunkVar)
 
-                genBinding (LazyBinding name var (Lf [] _ args body)) = do
-                    argRegs <- mapM makeArgument args
-                    let varMap = M.fromList (zip (map (varID . snd) args) (map IR.ValVariable argRegs))
+                    pure (varID var, thunkObject)
+
+                genBinding (LazyBinding name var (Lf [] args body)) = do
+                    (argRegs, argVarMap) <- mapAndUnzipM makeArgument args
+                    let varMap = M.fromList argVarMap
                     func <- pushFunction name argRegs
+                    let funcVal = IR.ValFunction (varType var) func
                     pushBlock
                     result <- local ( (nameMap %~ M.union varMap)
-                                    . (nameMap %~ M.insert (varID var) (IR.ValFunction func))
+                                    . (nameMap %~ M.insert (varID var) funcVal)
                                     ) $ codegen body
-                    addInstruction $ IR.Return (Just result)
+                    ret (Just result)
                     popBlock
                     popFunction
-                    pure (M.singleton (varID var) (IR.ValFunction func))
+                    pure (varID var, funcVal)
 
-                genBinding (LazyBinding name var (Lf captures _ args body)) = do
-                    let closureSize = labelSize + sum (map varSize captures)
-                    clReg <- Strict <$> newVar
-                    let clVar = IR.ValVariable clReg
+                genBinding (LazyBinding name var (Lf captures args body)) = do
+                    let funcType = thunkFunc (map (varType . snd) args)
+                    let closureType = IR.Structure
+                                          ( funcType
+                                          : map varType captures
+                                          )
+                    clReg <- mkVar Strict
 
-                    clArg <- StrictArgument <$> newVar
+                    clArgReg <- mkArg Strict
+                    let clArgVar = IR.ValVariable (IR.Pointer closureType) clArgReg
 
-                    argRegs <- mapM makeArgument args
-                    let varMap = M.fromList (zip (map (varID . snd) args) (map IR.ValVariable argRegs))
+                    (argRegs, argVarMap) <- mapAndUnzipM makeArgument args
+                    let varMap = M.fromList argVarMap
 
-                    funcName <- pushFunction name (clArg:argRegs)
-                    let funcNameValue = IR.ValFunction funcName
-                        clArgVar = IR.ValVariable clArg
+                    funcName <- pushFunction name (clArgReg:argRegs)
 
-                    -- Add an instruction to allocate the memory
-                    -- Then write the function address
-                    addInstruction $ IR.MAlloc clReg (mkInt closureSize)
-                    addInstruction $ IR.Write funcNameValue clVar labelSize
-                    closureWriter <- createAddition clVar (mkInt labelSize)
+                    capVals <- mapM (\v -> asks ((M.! varID v) . (^. nameMap))) captures
+                    -- let clVal = IR.ValStruct 
+                    --                 ( IR.Value (IR.ValFunction funcType funcName)
+                    --                 : map IR.Value capVals
+                    --                 )
+                    let clVal = IR.ValImmediate (IR.Int1 False)
 
-                    -- Write the captured variables into the closure
-                    packClosure captures closureWriter
+                    clVar <- malloc (pure clReg) closureType
+                    funcPtr <- getElementPtr (mkVar Strict) clVar [0]
+                    write (IR.ValFunction funcType funcName) funcPtr
+                    zipWithM_ (writeCapture clVar) captures [1..]
                     
                     -- Now we start to generate the function
                     pushBlock
 
                     -- Unpack the captured variabes from the closure
-                    captureStart <- Strict <$> newVar
-                    addInstruction $ IR.Binop IR.Add captureStart clArgVar (mkInt labelSize)
-                    closureVars <- unpackClosure captures captureStart
+                    closureVars <- M.fromList <$> zipWithM (readCapture clArgVar) captures [1..]
 
                     -- Now, we run the regular, strict code generator for the body.
                     result <- local ( (nameMap %~ M.union closureVars . M.union varMap)
                                     . (nameMap %~ M.insert (varID var) clArgVar)
                                     ) $ codegen body
-                    addInstruction $ IR.Return (Just result)
+
+                    ret (Just result)
+
                     popBlock
                     popFunction
-                    pure (M.singleton (varID var) clVar)
+                    pure (varID var, clVar)
 
-                genBinding (EagerBinding _ _ pat body) = do
-                    res <- local (recursiveStrict %~ S.union (namesInPattern pat)) $ codegen body
-                    fst <$> unpackPattern (addInstruction $ IR.Throw 1) pat res
+                genBinding (EagerBinding _ var body) = do
+                    res <- local (recursiveStrict %~ S.insert var) $ codegen body
+                    pure (varID var, res)
+                    -- fst <$> unpackPattern (throw 1) pat res
 
-                packClosure :: [Var] -> Variable -> Compiler ()
-                packClosure [] _ = pure ()
-                packClosure [V sz v] out = do
-                    val <- asks ((M.! v) . (^. nameMap))
-                    addInstruction $ IR.Write val (IR.ValVariable out) (fromIntegral sz)
-                packClosure (V sz v:rest) out = do
-                    let out' = IR.ValVariable out
-                    val <- asks ((M.! v) . (^. nameMap))
-                    addInstruction $ IR.Write val out' (fromIntegral sz)
-                    next <- Strict <$> newVar
-                    addInstruction $ IR.Binop IR.Add next out' (mkInt sz)
-                    packClosure rest next
+                writeCapture :: Value -> Var -> Int -> Compiler ()
+                writeCapture base v offset = do
+                    capVal <- asks ((M.! varID v) . (^. nameMap))
+                    capPtr <- getElementPtr (mkArg Strict) base [offset]
+                    write capVal capPtr
 
-                unpackClosure :: [Var] -> Variable -> Compiler NameMap
-                unpackClosure [] _ = pure M.empty
-                unpackClosure [V sz v] clVar = do
-                    readLazy <- asks (isValueLazy . (M.! v) . (^. nameMap))
-                    valReg <- if readLazy
-                                 then Lazy <$> newVar <*> pure (fromIntegral sz)
-                                 else Strict <$> newVar
-                    addInstruction $ IR.Read valReg (IR.ValVariable clVar) (fromIntegral sz)
-                    pure (M.singleton v (IR.ValVariable valReg))
-                unpackClosure (V sz v:rest) clVar = do
-                    let cl' = IR.ValVariable clVar
-                    readLazy <- asks (isValueLazy . (M.! v) . (^. nameMap))
-                    valReg <- if readLazy
-                                 then Lazy <$> newVar <*> pure (fromIntegral sz)
-                                 else Strict <$> newVar
-                    addInstruction $ IR.Read valReg cl' (fromIntegral sz)
-                    readLazy <- asks (isValueLazy . (M.! v) . (^. nameMap))
-                    next <- Strict <$> newVar
-                    addInstruction $ IR.Binop IR.Add next cl' (mkInt sz)
-                    M.insert v (IR.ValVariable valReg) <$> unpackClosure rest next
+                readCapture :: Value -> Var -> Int -> Compiler (Integer, Value)
+                readCapture base v offset = do
+                    addr <- getElementPtr (mkVar Strict) base [offset]
+                    evalType <- asks (evaluation . (M.! varID v) . (^. nameMap))
+                    val <- read (mkVar evalType) addr
+                    pure (varID v, val)
 
-                makeArgument :: (Bool, Var) -> Compiler Variable
-                makeArgument (eager, v)
-                    | eager = StrictArgument <$> newVar
-                    | otherwise = LazyArgument <$> newVar <*> pure (fromIntegral (varSize v))
+                makeArgument :: (Bool, Var) -> Compiler (Variable, (Integer, Value))
+                makeArgument (eager, v) = do
+                    arg <- if eager
+                              then mkArg Strict
+                              else mkArg Lazy
+                    pure (arg, (varID v, IR.ValVariable (varType v) arg))
 
         codegen (Case disc branches) = do
             discVal <- codegen disc
-            forcedDisc <- forceCompute discVal
             pushBlock
             restLabel <- blockLabel
             swapBlocks
-            phiNodes <- genBranches restLabel forcedDisc (toList branches)
+            phiNodes <- genBranches restLabel discVal (toList branches)
             popBlock
-            case phiNodes of
-              [IR.PhiNode (nodeVal, _)] -> pure nodeVal
-              _ -> do
-                  result <- Strict <$> newVar
-                  addInstruction $ IR.Phi result phiNodes
-                  pure (IR.ValVariable result)
+            phi (mkVar Strict) phiNodes
             where
                 genBranches :: IR.Label -> Value -> [Alternative] -> Compiler [PhiNode]
                 genBranches _ _ [] = do
-                    addInstruction $ IR.Throw 1
+                    throw 1
                     pure []
                 genBranches successLabel var (Alt pattern expr:rest) = do
                     (names, fail) <- unpackPattern (genBranches successLabel var rest) pattern var
                     branchVal <- local (nameMap %~ M.union names) $ codegen expr
-                    addInstruction $ IR.Jump successLabel
+                    jump successLabel
                     branchLabel <- blockLabel
                     pure (IR.PhiNode (branchVal, branchLabel) : fromMaybe [] fail)
 
-        codegen (Application arity fun args) = do
-            funVal <- lookupVar (varID fun)
-            argVals <- mapM (lookupVar . varID) args
-            resultReg <- Strict <$> newVar
-            addInstruction $ IR.Call (Just resultReg) funVal argVals
-            pure (IR.ValVariable resultReg)
-            -- where
-            --     unpackLazy :: Value -> [Value]
-            --     unpackLazy (IR.ValVariable (Lazy _ addr offset _)) = [addr, offset]
-            --     unpackLazy v = [v]
+        codegen (Application fun []) = do
+            funVal <- lookupVar fun
+            forceCompute funVal
 
-                -- unpackClosure :: Value -> [Value]
-                -- unpackClosure (IR.ValClosure (IR.Closure _ (Just cl))) = [IR.ValVariable cl]
-                -- unpackClosure (IR.ValVariable v) = [IR.ValVariable v]
-                -- unpackClosure _ = []
+        codegen (Application fun args) = do
+            funVal <- lookupVar fun
+            forcedFunVal <- forceCompute funVal
+            argVals <- forM args $ \case
+                Var v -> lookupVar v
+                Lit l -> codegen (Literal l)
+            call (mkVar Strict) forcedFunVal argVals
                 
         codegen (PrimApp fun args) = do
-            argVals <- mapM (lookupVar . varID) args
+            argVals <- forM args $ \case
+                Var v -> lookupVar v
+                Lit l -> codegen (Literal l)
             forced <- mapM forceCompute argVals
             let iBuilder = B.functions M.! fun
-            res <- Strict <$> newVar
-            addInstruction $ iBuilder res forced
-            pure (IR.ValVariable res)
+            B.mkPrim iBuilder (mkVar Strict) argVals
 
         codegen (ConsApp {}) = undefined
 
-        codegen (Variable name) = lookupVar (varID name)
-        
         codegen (Literal lit) = genLiteral lit
             where
                 genLiteral :: PrimitiveLiteral -> Compiler Value
-                genLiteral (IntLiteral i) = pure (IR.ValImmediate (IR.Int64 i))
+                genLiteral (IntLiteral i) = pure (mkInt i)
                 genLiteral (RealLiteral r) = pure (IR.ValImmediate (IR.Real64 r))
 
         codegen (PackedTuple vs) = do
-            let allocSize = sum (map varSize vs)
-            tupleReg <- Strict <$> newVar
-            addInstruction $ IR.MAlloc tupleReg (mkInt allocSize)
-            let tupleVar = IR.ValVariable tupleReg
-            writeOutTuple tupleVar vs
-            pure tupleVar
+            let tupleType = IR.Structure (map IR.datatype vs)
+            tuplePtr <- malloc (mkVar Strict) tupleType
+            zipWithM_ (writeVal tuplePtr) vs [0..]
+            pure tuplePtr
             where
-                writeOutTuple :: Value -> [Var] -> Compiler ()
-                writeOutTuple addr [] = pure ()
-                writeOutTuple addr [v] = do
-                    val <- lookupVar (varID v)
-                    addInstruction $ IR.Write val addr (fromIntegral (varSize v))
-                writeOutTuple addr (v:vs) = do
-                    val <- lookupVar (varID v)
-                    addInstruction $ IR.Write val addr (fromIntegral (varSize v))
-                    next <- createAddition addr (mkInt (varSize v))
-                    writeOutTuple (IR.ValVariable next) vs
+                getValue :: Atom -> Compiler Value
+                getValue (Var v) = lookupVar v
+                getValue (Lit l) = codegen (Literal l)
 
-        codegen (Projector offset size v) = do
-            base <- lookupVar (varID v)
+                writeVal :: Value -> Atom -> Int -> Compiler ()
+                writeVal base atom offset = do
+                    elemPtr <- getElementPtr (mkVar Strict) base [offset]
+                    val <- getValue atom
+                    write val elemPtr
+
+        codegen (Projector offset v) = do
+            let elemType = varType v
+            base <- lookupVar v
             forced <- forceCompute base
-            addr <- createAddition forced (mkInt offset)
-            result <- Strict <$> newVar
-            addInstruction $ IR.Read result (IR.ValVariable addr) (fromIntegral size)
-            pure (IR.ValVariable result)
-        
-        lookupVar :: Integer -> Compiler Value
-        lookupVar vid = asks ((M.! vid) . (^. nameMap))
+            addr <- getElementPtr (mkVar Strict) forced [offset]
+            read (mkVar Strict) addr
+
+        codegen (Free var expr) = do
+            freeVar <- lookupVar var
+            addInstruction $ IR.Free freeVar
+            codegen expr
+
+        lookupVar :: Var -> Compiler Value
+        lookupVar v = do
+            strictRecVars <- asks (^. recursiveStrict)
+            if S.member v strictRecVars
+               then do
+                   popBlock
+                   pushBlock
+                   loop <- blockLabel
+                   jump loop
+                   popBlock
+                   pushBlock
+                   pure (IR.ValImmediate IR.Undef)
+               else asks ((M.! varID v) . (^. nameMap))
 
         forceCompute :: Value -> Compiler Value
-        forceCompute addr@(IR.ValVariable (Lazy _ sz)) = force addr sz
-        forceCompute addr@(IR.ValVariable (LazyArgument _ sz)) = force addr sz
+        forceCompute addr@(IR.ValVariable dt (Variable Lazy _)) = force addr dt
+        forceCompute addr@(IR.ValVariable dt (Argument Lazy _)) = force addr dt
         forceCompute v = pure v
 
-        force :: Value -> Word64 -> Compiler Value
-        force addr sz = do
+        force :: Value -> IR.DataType -> Compiler Value
+        force baseAddr dt = do
             -- We start with the entry block stack like:
             --  ... | entry
             -- We add instructions to start the test to see if the value
             -- has been evaluated
-            tag <- Strict <$> newVar
-            addInstruction $ IR.Read tag addr 1
-            evaluated <- Strict <$> newVar
-            addInstruction $ IR.Binop IR.Equal evaluated (IR.ValVariable tag) (mkInt 1)
+            evalTagPtr <- getElementPtr (mkVar Strict) baseAddr [0, 0]
+            evalTag <- read (mkVar Strict) evalTagPtr
+            evaluated <- binop IR.Equal (mkVar Strict) evalTag (mkInt1 True)
 
             -- Get the payload pointer
-            payload <- IR.ValVariable <$> createAddition addr (mkInt 1)
+            payloadPtr <- getElementPtr (mkVar Strict) baseAddr [1]
 
             -- Next, we push the "force" block:
             --  ... | entry | force
             pushBlock
 
             -- Read the call address out of the closure. This is in the payload location
-            callTarget <- Strict <$> newVar
-            addInstruction $ IR.Read callTarget payload labelSize
+            callTargetPtr <- bitcast (mkVar Strict) payloadPtr (IR.Pointer (thunkFunc []))
+            callTarget <- read (mkVar Strict) callTargetPtr
             -- Call the thunk
-            addInstruction $ IR.Call Nothing (IR.ValVariable callTarget) [addr]
+            voidCall callTarget [baseAddr]
 
             -- Now, we swap the blocks. This is to avoid the entry block being buried
             -- later on. Then, we push the "rest" block.
@@ -385,8 +400,7 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
             restLabel <- blockLabel
 
             -- We now read out the result variable from the payload
-            computeVar <- Strict <$> newVar
-            addInstruction $ IR.Read computeVar payload sz
+            payload <- read (mkVar Strict) payloadPtr
 
             -- Now we swap the top two blocks. This is because we wish to pop the entry
             -- then force blocks.
@@ -395,14 +409,14 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
 
             -- Add the branch instruction to skip over the force block in the case that
             -- the thunk has already been forced
-            addInstruction $ IR.Branch (IR.ValVariable evaluated) restLabel
+            branch evaluated restLabel
 
             -- Pop, then swap, then pop again to apply the entry then force blocks
             popBlock
             swapBlocks
             popBlock
 
-            pure (IR.ValVariable computeVar)
+            pure payload
 
         unpackPattern :: Compiler a -> Pattern -> Value -> Compiler (NameMap, Maybe a)
         unpackPattern onFail pattern v = do
@@ -418,43 +432,23 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
                 unpack :: Pattern -> Value -> Compiler (NameMap, Bool)
                 unpack (VarPattern name) var =
                     pure (M.singleton (varID name) var, False)
-                unpack (ConsPattern cons args) var = undefined
-                unpack (LiteralPattern lit) var = unpackLit lit
+                unpack (ConsPattern _ cons args) var = undefined
+                unpack (TuplePattern ts) var = do
+                    (nameMaps, refutable) <- unzip <$> zipWithM unpackElem ts [0..]
+                    pure (M.unions nameMaps, or refutable)
                     where
-                        unpackLit :: AST.Literal Pattern -> Compiler (NameMap, Bool)
-                        unpackLit (AST.IntLiteral i) =
+                        unpackElem :: Pattern -> Int -> Compiler (NameMap, Bool)
+                        unpackElem pat index = do
+                            elemPtr <- getElementPtr (mkVar Strict) var [index]
+                            elem <- read (mkVar Strict) elemPtr
+                            unpack pat elem
+                unpack (LitPattern lit) var = unpackLit lit
+                    where
+                        unpackLit :: PrimitiveLiteral -> Compiler (NameMap, Bool)
+                        unpackLit (IntLiteral i) =
                             (, True) <$> literalMatcher (mkInt i)
-                        unpackLit (AST.RealLiteral r) =
+                        unpackLit (RealLiteral r) =
                             (, True) <$> literalMatcher (IR.ValImmediate (IR.Real64 r))
-                        unpackLit (AST.ListLiteral ls) = undefined
-                        unpackLit (AST.TupleLiteral ts) = unpackTuple ts var
-                            where
-                                unpackTuple :: [Pattern] -> Value -> Compiler (NameMap, Bool)
-                                unpackTuple [] _ = pure (M.empty, False)
-                                unpackTuple [p] addr = do
-                                    let pSize = patternSize p
-                                    val <- Strict <$> newVar
-                                    addInstruction $ IR.Read val addr pSize
-                                    unpack p (IR.ValVariable val)
-                                unpackTuple (p:ps) addr = do
-                                    let pSize = patternSize p
-                                    val <- Strict <$> newVar
-                                    addInstruction $ IR.Read val addr pSize
-                                    (names, refutable) <- unpack p (IR.ValVariable val)
-                                    next <- createAddition addr (mkInt pSize)
-                                    (names', refutable') <- unpackTuple ps (IR.ValVariable next)
-                                    pure (M.union names names', refutable || refutable')
-
-                        patternSize :: Pattern -> Word64
-                        patternSize (VarPattern v) = fromIntegral (varSize v)
-                        patternSize (ConsPattern _ _) = undefined
-                        patternSize (LiteralPattern lit) = litSize lit
-                            where
-                                litSize :: AST.Literal Pattern -> Word64
-                                litSize (AST.IntLiteral _) = int64Size
-                                litSize (AST.RealLiteral _) = realSize
-                                litSize (AST.ListLiteral _) = undefined
-                                litSize (AST.TupleLiteral _) = pointerSize
 
                         literalMatcher :: Value -> Compiler NameMap
                         literalMatcher checkValue = do
@@ -468,9 +462,8 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
                             -- Now, swap so entry is on top:
                             --  ... | rest | entry
                             swapBlocks
-                            cmpVar <- Strict <$> newVar
-                            addInstruction $ IR.Binop IR.Equal cmpVar var checkValue
-                            addInstruction $ IR.Branch (IR.ValVariable cmpVar) restLabel
+                            cmp <- binop IR.Equal (mkVar Strict) var checkValue
+                            branch cmp restLabel
 
                             -- Then, pop the entry block:
                             --  ... | rest
@@ -539,35 +532,34 @@ compile expr poset = execState (runReaderT finalise startInfo) startState ^. com
             modify (stream .~ rest)
             pure name
 
-        addInstruction :: Instruction -> Compiler ()
-        addInstruction i = do
-            modify (blockStack . ix 0 . IR.iList %~ (:|> i))
-
-        createAddition :: Value -> Value -> Compiler Variable
-        createAddition v1 v2 = do
-            res <- Strict <$> newVar
-            addInstruction $ IR.Binop IR.Add res v1 v2
-            pure res
-
         newVar :: Compiler Integer
         newVar = do
             v <- gets (^. variableID)
             modify (variableID %~ (+1))
             pure v
 
+        mkVar :: Evaluation -> Compiler Variable
+        mkVar eval = Variable eval <$> newVar
+
+        mkArg :: Evaluation -> Compiler Variable
+        mkArg eval = Argument eval <$> newVar
+
         mkInt :: Integral a => a -> Value
         mkInt = IR.ValImmediate . IR.Int64 . fromIntegral
+
+        mkInt1 :: Bool -> Value
+        mkInt1 = IR.ValImmediate . IR.Int1 
     
-        isValueLazy :: Value -> Bool
-        isValueLazy (IR.ValVariable (Lazy {})) = True
-        isValueLazy (IR.ValVariable (LazyArgument {})) = True
-        isValueLazy _ = False
+        evaluation :: Value -> Evaluation
+        evaluation (IR.ValVariable _ (Variable eval _)) = eval
+        evaluation (IR.ValVariable _ (Argument eval _)) = eval
+        evaluation _ = Strict
 
         startState :: CompileState
         startState = CompileState 
             { _blockStack = []
             , _funcStack = []
-            , _compiledProgram = IR.Program []
+            , _compiledProgram = IR.addStruct B.thunkTagStruct IR.emptyProgram
             , _labelIDs = Stream.iterate (+1) 0
             , _functionNames = fmap (\f -> IR.FID ("__anonymous_" ++ show f)) (Stream.iterate (+1) 0)
             , _thunkNames = fmap (\f -> IR.FID ("__thunk_" ++ show f)) (Stream.iterate (+1) 0)

@@ -87,7 +87,8 @@ buildFlowGraph fun =
                         node :: Node (IR.BasicBlock r)
                         node = addLinks (blockNameMap M.! (next ^. IR.label)) blk (Node (BlockNode blk) S.empty S.empty)
 
-                addLinks :: NodeID -> IR.BasicBlock r -> Node (IR.BasicBlock r) -> Node (IR.BasicBlock r)
+                addLinks :: NodeID -> IR.BasicBlock r -> Node (IR.BasicBlock r)
+                         -> Node (IR.BasicBlock r)
                 addLinks next bb = outEdges %~ updateLinks next (bb ^. IR.iList)
                 
                 updateLinks :: NodeID -> Seq (IR.Instruction r) -> S.HashSet NodeID -> S.HashSet NodeID
@@ -99,7 +100,8 @@ buildFlowGraph fun =
         backwardPass :: M.HashMap NodeID (Node (IR.BasicBlock r))
         backwardPass = M.foldlWithKey linkEdges forwardPass forwardPass
             where
-                linkEdges :: M.HashMap NodeID (Node (IR.BasicBlock r)) -> NodeID -> Node (IR.BasicBlock r)
+                linkEdges :: M.HashMap NodeID (Node (IR.BasicBlock r)) -> NodeID
+                          -> Node (IR.BasicBlock r)
                           -> M.HashMap NodeID (Node (IR.BasicBlock r))
                 linkEdges acc nid node = foldl (flip (M.adjust (addEdge nid))) acc (node ^. outEdges)
 

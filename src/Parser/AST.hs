@@ -14,6 +14,7 @@ module Parser.AST
     , MultiplicityAtom(..)
     , SourceLocation(..)
     , Loc(..)
+    , loc
 
     , Identifier(..)
     ) where
@@ -49,6 +50,9 @@ instance Show a => Show (Loc a) where
 
 instance Functor Loc where
     fmap f (L sl x) = L sl (f x)
+
+loc :: a -> Loc s -> Loc e -> Loc a
+loc element (L start _) (L end _) = L (SL (slStart start) (slEnd end) (slLine start)) element
 
 instance Hashable a => Hashable (Loc a)
 

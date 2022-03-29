@@ -40,20 +40,36 @@ typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheck
             Let <$> typeRepresentative t <*> mapM remapBind binds <*> remapToReps body
             where
                 remapBind :: TypedLetBinding -> Checker TypedLetBinding
-                remapBind (TypedLetBinding mul pat bind) = TypedLetBinding mul pat <$> remapToReps bind
+                remapBind (TypedLetBinding mul pat bind) = 
+                    TypedLetBinding mul <$> remapPattern pat <*> remapToReps bind
         remapToReps (Case t mul disc branches) =
             Case <$> typeRepresentative t <*> pure mul <*> remapToReps disc <*> mapM remapBranch branches
             where
                 remapBranch :: TypedCaseBranch -> Checker TypedCaseBranch
-                remapBranch (TypedCaseBranch pat expr) = TypedCaseBranch pat <$> remapToReps expr
+                remapBranch (TypedCaseBranch pat expr) =
+                    TypedCaseBranch <$> remapPattern pat <*> remapToReps expr
         remapToReps (Application t fun arg) =
             Application <$> typeRepresentative t <*> remapToReps fun <*> remapToReps arg
         remapToReps (Lambda t mul arg body) =
-            Lambda <$> typeRepresentative t <*> pure mul <*> pure arg <*> remapToReps body
+            Lambda <$> typeRepresentative t <*> pure mul <*> remapPattern arg <*> remapToReps body
         remapToReps (Variable t name) =
             Variable <$> typeRepresentative t <*> pure name
         remapToReps (Literal t lit) =
             Literal <$> typeRepresentative t <*> pure lit
+
+        remapPattern :: Pattern -> Checker Pattern
+        remapPattern (VariablePattern t name) =
+            VariablePattern <$> typeRepresentative t <*> pure name
+        remapPattern (ConstructorPattern name ps) =
+            ConstructorPattern name <$> mapM remapPattern ps
+        remapPattern (LiteralPattern lit) = LiteralPattern <$> remapLitPattern lit
+            where
+                remapLitPattern :: Literal Pattern -> Checker (Literal Pattern)
+                remapLitPattern (IntLiteral i) = pure (IntLiteral i)
+                remapLitPattern (RealLiteral r) = pure (RealLiteral r)
+                remapLitPattern (ListLiteral ls) = ListLiteral <$> mapM remapPattern ls
+                remapLitPattern (TupleLiteral ts) = TupleLiteral <$> mapM remapPattern ts
+
 
 -- Typecheck and infer the type of an expression under a given variable context.
 typecheck' :: Context -> Loc ValExpr -> Checker TypedExpr
@@ -250,6 +266,13 @@ testEverything :: String -> IO ()
 testEverything s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (showError s tvm e)
                      Right (t, _) -> putStrLn (showType M.empty (typeof t))
+    where
+        fromRight (Right x) = x
+
+testTypeCheck :: String -> IO ()
+testTypeCheck s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
+                     Left (e, tvm) -> putStrLn (showError s tvm e)
+                     Right (t, _) -> print t
     where
         fromRight (Right x) = x
 

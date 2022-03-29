@@ -9,6 +9,7 @@ import qualified IR.Function as IR
 import qualified IR.Program as IR
 import qualified IR.Analysis.LiveVariableAnalysis as IR
 import qualified IR.Analysis.FlowGraph as IR
+import qualified IR.DataType as IR
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
@@ -19,6 +20,9 @@ import Data.Foldable (toList)
 
 import Control.Lens
 import Control.Monad.State
+
+-- TODO: Remove
+import Debug.Trace
 
 -- type BytecodeInstruction = IR.Instruction Int Int Int
 
@@ -51,6 +55,7 @@ data BytecodeInstruction hole
     | Write (BytecodeValue hole) (BytecodeValue hole) Word64
     | Read Register (BytecodeValue hole) Word64
     | MAlloc Register (BytecodeValue hole)
+    | Free (BytecodeValue hole)
     | Branch (BytecodeValue hole) hole
     | Jump hole
     | Call (BytecodeValue hole)
@@ -66,6 +71,7 @@ instance Show hole => Show (BytecodeInstruction hole) where
     show (Write val addr size) = "wr " ++ show size ++ " " ++ show val ++ ", (" ++ show addr ++ ")"
     show (Read res loc size) = show res ++ " <- rd " ++ show size ++ " (" ++ show loc ++ ")"
     show (MAlloc res size) = show res ++ " = malloc " ++ show size
+    show (Free ptr) = "free " ++ show ptr
     show (Branch val label) = "br " ++ show val ++ ", $" ++ show label
     show (Jump label) = "br $" ++ show label
     show (Call addr) = "call " ++ show addr
@@ -81,6 +87,7 @@ instance Functor BytecodeInstruction where
     fmap f (Write val addr size) = Write (fmap f val) (fmap f addr) size
     fmap f (Read res loc size) = Read res (fmap f loc) size
     fmap f (MAlloc res size) = MAlloc res (fmap f size)
+    fmap f (Free ptr) = Free (fmap f ptr)
     fmap f (Branch val label) = Branch (fmap f val) (f label)
     fmap f (Jump label) = Jump (f label)
     fmap f (Call addr) = Call (fmap f addr)
@@ -119,8 +126,11 @@ data TargetHole
     = Fun IR.FunctionID
     | Block IR.Label
 
+type Generator a = State GeneratorState a
+
 data GeneratorState = GeneratorState
     { _phiRemaps :: M.HashMap IR.Label (C.Variable, C.Value)
+    , _readTransforms :: M.HashMap C.Variable (Register -> Generator ())
     , _is :: Seq.Seq (BytecodeInstruction TargetHole)
     , _funcNameMap :: M.HashMap IR.FunctionID Word64
     , _blockLabelMap :: M.HashMap IR.Label Word64
@@ -129,12 +139,11 @@ data GeneratorState = GeneratorState
 
 makeLenses ''GeneratorState
 
-type Generator a = State GeneratorState a
-
 generateBytecode :: C.Program -> Bytecode
 generateBytecode compState = 
     let initState = GeneratorState
             { _phiRemaps = M.empty
+            , _readTransforms = M.empty
             , _is = Seq.Empty
             , _funcNameMap = M.empty
             , _blockLabelMap = M.empty
@@ -221,12 +230,35 @@ generateBytecode compState =
                     pushI (Binop op <$> remapVar res <*> remapV e1 <*> remapV e2)
                 emit _ (IR.Move res e) =
                     pushI (Move <$> remapVar res <*> remapV e)
-                emit _ (IR.Write val addr size) =
-                    pushI (Write <$> remapV val <*> remapV addr <*> pure size)
-                emit _ (IR.Read res loc size) =
-                    pushI (Read <$> remapVar res <*> remapV loc <*> pure size)
+                emit _ (IR.Write val addr dt) =
+                    pushI (Write <$> remapV val <*> remapV addr <*> pure (IR.sizeof dt))
+                emit _ (IR.Read res loc dt) = do
+                    let readReg = remapVar res
+                    pushI (Read <$> readReg <*> remapV loc <*> pure (IR.sizeof dt))
+                    transform <- gets (M.lookup res . (^. readTransforms))
+                    case (transform, readReg) of
+                      (Just trans, Just reg) -> trans reg
+                      _ -> pure ()
+                emit _ inst@(IR.GetElementPtr res addr path) = do
+                    offsetVal <- offset
+                    pushI (Binop IR.Add <$> remapVar res <*> remapV addr <*> pure offsetVal)
+                    where
+                        offset :: Generator (BytecodeValue TargetHole)
+                        offset = do
+                            let IR.Pointer dt = IR.dataType addr
+                                (byteOffset, bitOffset) = IR.elementPtrOffset dt path
+                            when (bitOffset /= 0) $ do
+                                let extractBit readReg = do
+                                        let offset = Immediate (IR.Int64 (-bitOffset))
+                                        pushI (Just (Binop IR.Shift readReg (Register readReg) offset))
+                                modify (readTransforms %~ M.insert res extractBit)
+                            pure (Immediate (IR.Int64 byteOffset))
+                emit _ (IR.BitCast res e _) =
+                    pushI (Move <$> remapVar res <*> remapV e)
                 emit _ (IR.MAlloc res size) =
                     pushI (MAlloc <$> remapVar res <*> remapV size)
+                emit _ (IR.Free ptr) =
+                    pushI (Free <$> remapV ptr)
                 emit lvs (IR.Call res func args) = do
                     let pushOrder = S.toList lvs
 
@@ -259,8 +291,9 @@ generateBytecode compState =
 
                 remapV :: C.Value -> Maybe (BytecodeValue TargetHole)
                 remapV (IR.ValImmediate imm) = Just (Immediate imm)
-                remapV (IR.ValVariable v) = Register <$> remapVar v
-                remapV (IR.ValFunction name) = Just (CodeLocation (Fun name))
+                remapV (IR.ValVariable _ v) = Register <$> remapVar v
+                remapV (IR.ValFunction _ name) = Just (CodeLocation (Fun name))
+                remapV (IR.ValSizeOf dt) = Just (Immediate (IR.Int64 (IR.sizeof dt)))
 
                 remapVar :: C.Variable -> Maybe Register
                 remapVar var = Reg <$> M.lookup var allocator

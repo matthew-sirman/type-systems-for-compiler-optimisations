@@ -61,6 +61,7 @@ tokens :-
 
     ","                                 { symbol TokComma }
     "|"                                 { symbol TokPipe }
+    ";"                                 { symbol TokSemiColon }
     "\"                                 { symbol TokBackslash }
 
     [a-z \_] [$alpha $digit \_ \']*     { identifier TokLowerId }
@@ -113,6 +114,7 @@ data Token
 
     | TokComma                      -- ,
     | TokPipe                       -- |
+    | TokSemiColon                  -- ;
     | TokBackslash                  -- \
 
     | TokLowerId Identifier         -- [a-z_][a-zA-Z_'']*

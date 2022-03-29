@@ -24,6 +24,7 @@ data InterpreterState = InterpreterState
     , _stack :: [Word64]
     , _returnVal :: Word64
     , _registerFile :: IOArray Word64 Word64
+    , _instructionsExecuted :: Word64
     }
 
 makeLenses ''InterpreterState
@@ -58,12 +59,14 @@ interpret settings bytecode = do
             , _stack = []
             , _returnVal = 0
             , _registerFile = regFileArray
+            , _instructionsExecuted = 0
             }
     (programResult, endState) <- runStateT (runExceptT (forever (fetch >>= step))) initialState
     case programResult of
       Left 0 -> do
           when (settings ^. debug) $ do
               putStrLn $ "Total memory use: " ++ show (endState ^. allocated)
+              putStrLn $ "Instructions executed: " ++ show (endState ^. instructionsExecuted)
               putStrLn "Result:"
           print (endState ^. returnVal)
       Left (-1) -> putStrLn "Ran out of heap memory!"
@@ -75,6 +78,7 @@ interpret settings bytecode = do
             pc <- gets (^. programCounter)
             let instruction = (bytecode ^. instructions) ! pc
             modify (programCounter %~ (+1))
+            modify (instructionsExecuted %~ (+1))
             pure instruction
 
 step :: BytecodeInstruction Word64 -> Interpreter ()
@@ -100,6 +104,8 @@ step (MAlloc res size) = do
     pointer <- gets (^. allocated)
     modify (allocated %~ (+allocSize))
     storeVal res (fromIntegral pointer)
+step (Free ptr) = do
+    pure ()
 step (Branch val label) = do
     cond <- loadVal val
     if cond == 0
@@ -142,6 +148,12 @@ stepBin Mul res v1 v2 = do
     storeVal res (v1 * v2)
 stepBin Div res v1 v2 = do
     storeVal res (v1 `div` v2)
+stepBin And res v1 v2 = do
+    storeVal res (v1 .&. v2)
+stepBin Or res v1 v2 = do
+    storeVal res (v1 .|. v2)
+stepBin Shift res v1 v2 = do
+    storeVal res (shift v1 (fromIntegral v2))
 stepBin Equal res v1 v2 = do
     if v1 == v2
        then storeVal res 1
@@ -173,7 +185,8 @@ loadVal (Immediate imm) = readImm imm
         readImm :: Immediate -> Interpreter Word64
         readImm (Int64 i) = pure (fromIntegral i)
         readImm (Real64 r) = undefined
-        readImm (Bool b) = undefined
+        readImm (Int1 True) = pure 1
+        readImm (Int1 False) = pure 0
         readImm Unit = undefined
 loadVal (Register (Reg reg)) = do
     rf <- gets (^. registerFile)

@@ -89,7 +89,6 @@ type Message = String
 data TypeError
     = RelevancyViolation SourceLocation Identifier
     | AffinityViolation SourceLocation Identifier
-    | ContextRelevancyViolation SourceLocation Identifier
     | ContextAffinityViolation SourceLocation Identifier
     | DuplicateVariableDefinition SourceLocation Identifier
     | VariableNotInScope SourceLocation Identifier
@@ -174,6 +173,7 @@ data TypedExpr
     | Lambda Type Multiplicity Pattern TypedExpr
     | Variable Type Identifier
     | Literal Type (Literal TypedExpr)
+    deriving Show
     
 instance TypeContainer TypedExpr where
     typeof (Let t _ _) = t
@@ -184,11 +184,13 @@ instance TypeContainer TypedExpr where
     typeof (Literal t _) = t
 
 data TypedLetBinding = TypedLetBinding Multiplicity Pattern TypedExpr
+    deriving Show
 
 instance TypeContainer TypedLetBinding where
     typeof (TypedLetBinding _ _ e) = typeof e
 
 data TypedCaseBranch = TypedCaseBranch Pattern TypedExpr
+    deriving Show
 
 instance TypeContainer TypedCaseBranch where
     typeof (TypedCaseBranch _ e) = typeof e
@@ -197,6 +199,7 @@ data Pattern
     = VariablePattern Type Identifier
     | ConstructorPattern Identifier [Pattern]
     | LiteralPattern (Literal Pattern)
+    deriving Show
 
 data CheckStackFrame = CheckStackFrame
     { _termNameContext :: M.HashMap Identifier TermVar
@@ -376,11 +379,9 @@ typeError err = do
 
 showError :: String -> TypeVarMap -> TypeError -> String
 showError text tvm (RelevancyViolation loc name) =
-    showContext text loc ++ "Variable \"" ++ show name ++ "\" was marked relevant, but never consumed."
+    showContext text loc ++ "Variable \"" ++ show name ++ "\" was marked relevant, but might never be consumed."
 showError text tvm (AffinityViolation loc name) =
     showContext text loc ++ "Variable \"" ++ show name ++ "\" was marked affine, but consumed more than once."
-showError text tvm (ContextRelevancyViolation loc name) =
-    showContext text loc ++ "Variable \"" ++ show name ++ "\" with relevant constraint used in a context which may violate relevancy."
 showError text tvm (ContextAffinityViolation loc name) =
     showContext text loc ++ "Variable \"" ++ show name ++ "\" with affine constraint used in a context which may violate affinity."
 showError text tvm (VariableNotInScope loc name) =

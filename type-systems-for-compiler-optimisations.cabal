@@ -28,6 +28,7 @@ library
       Builtin.Builtin
       Builtin.Codegen
       Builtin.Types
+      Compiler.ADT
       Compiler.Bytecode
       Compiler.Compiler
       Compiler.RegisterAllocator
@@ -37,7 +38,9 @@ library
       IR.Analysis.FlowGraph
       IR.Analysis.LiveVariableAnalysis
       IR.BasicBlock
+      IR.DataType
       IR.Function
+      IR.InstructionBuilder
       IR.Instructions
       IR.Program
       Parser.AST

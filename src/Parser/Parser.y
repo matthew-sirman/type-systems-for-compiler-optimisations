@@ -72,6 +72,7 @@ import Data.Maybe (fromJust)
 
     ','                 { L _ TokComma }
     '|'                 { L _ TokPipe }
+    ';'                 { L _ TokSemiColon }
     '\\'                { L _ TokBackslash }
 
     lvar                { L _ (TokLowerId _) }
@@ -99,7 +100,6 @@ stmts :: { [Loc Statement] }
 
 stmt :: { Loc Statement }
     : lvar ':' type ';;'                                { loc (TypeDecl (idTok $1) $3) $1 $> }
-    {- | lvar '=' expr ';;'                                { loc (FuncDecl (idTok $1) $3) $1 $> } -}
     | lvar seq(pattern) '=' expr ';;'                   { loc (makeFuncDecl (idTok $1) $2 $4) $1 $> }
     | datatype ';;'                                     { loc (TypeDef $1) $1 $> }
 
@@ -180,10 +180,10 @@ annotated(p)
 
 case_branches :: { NE.NonEmpty (Loc CaseBranch) }
     : case_branch                                       { $1 NE.:| [] }
-    | case_branches case_branch                         { $2 NE.<| $1 }
+    | case_branches ';' case_branch                     { $3 NE.<| $1 }
 
 case_branch :: { Loc CaseBranch }
-    : '|' pattern '->' expr                             { loc (CaseBranch $2 $4) $1 $> }
+    : pattern '->' expr                                 { loc (CaseBranch $1 $3) $1 $> }
 
 pattern_list :: { [Loc SourcePattern] }
     : pattern                                           { [$1] }
@@ -245,9 +245,6 @@ maybe(p)
     | p                                                 { Just $1 }
 
 {
-
-loc :: a -> (Loc s) -> (Loc e) -> Loc a
-loc element (L start _) (L end _) = L (SL (slStart start) (slEnd end) (slLine start)) element
 
 idTok :: Loc Token -> Loc Identifier
 idTok (L sl (TokLowerId name)) = L sl name
