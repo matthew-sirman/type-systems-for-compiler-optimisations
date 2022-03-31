@@ -36,7 +36,7 @@ instance Show Immediate where
     show (Real64 r) = "r64 " ++ show r
     show (Int1 b) = "i1 " ++ if b then "1" else "0"
     show Unit = "unit ()"
-    show Undef = "undef"
+    show Undef = "***UNDEF***"
 
 data Value r
     = ValImmediate Immediate

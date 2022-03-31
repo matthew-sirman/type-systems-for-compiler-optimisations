@@ -2,47 +2,81 @@ module Main where
 
 import Parser.Parser
 import Parser.AST
+import Preprocessor.Preprocessor
 import Typing.Checker
 import Typing.Types
+import Compiler.Compiler
+import Compiler.Bytecode
+import Interpreter.Interpreter
 import Builtin.Builtin
 
 import System.Environment
 import Control.Monad.Except
 
-newtype Options = Options
+data Options = Options
     { sourceFile :: FilePath
+    , interpreterSettings :: InterpreterSettings
     }
 
 type Process a = ExceptT String IO a
+
+settings :: InterpreterSettings
+settings = defaultSettings
+    { _debug = True
+    , _showBytecode = False
+    }
 
 getOptions :: Process Options
 getOptions = do
     args <- liftIO getArgs
     case args of
-      (source:_) -> pure $ Options source
+      (source:_) -> pure $ Options source settings
       _ -> do
           throwError "Source file argument required."
 
 readSourceFile :: Options -> Process String
 readSourceFile opt = liftIO $ readFile (sourceFile opt)
 
-parseSource :: String -> Process (Loc ValExpr)
-parseSource source = case test_parseExpr source of
-                     Left e -> throwError e
-                     Right ve -> pure ve
+parseSource :: String -> Process [Loc Statement]
+parseSource source =
+    case parse source of
+      Left e -> throwError e
+      Right stmts -> pure stmts
 
-runTypeChecker :: String -> Process ()
+preprocess :: String -> Process (Loc ValExpr, StaticContext)
+preprocess source = do
+    stmts <- parseSource source
+    case transformAST stmts defaultBuiltins of
+      Left e -> throwError (showPPError source e)
+      Right expr -> pure expr
+
+runTypeChecker :: String -> Process (TypedExpr, MultiplicityPoset)
 runTypeChecker source = do
-    ve <- parseSource source
-    case typecheck defaultBuiltins ve of
+    (ve, ctx) <- preprocess source
+    case typecheck ctx ve of
       Left (e, tvm) -> throwError (showError source tvm e)
-      Right (t, _) -> lift $ print (typeof t)
+      Right (t, ps) -> pure (t, ps)
+
+compileProgram :: TypedExpr -> MultiplicityPoset -> Process Program
+compileProgram expr ps =
+    pure (compile expr ps)
+
+generate :: Program -> Process Bytecode
+generate program =
+    pure (generateBytecode program)
+
+executeBytecode :: Options -> Bytecode -> Process ()
+executeBytecode opt bytecode =
+    liftIO $ interpret (interpreterSettings opt) bytecode
 
 pipeline :: Process ()
 pipeline = do
     opt <- getOptions
     source <- readSourceFile opt
-    runTypeChecker source
+    (expr, ps) <- runTypeChecker source
+    program <- compileProgram expr ps
+    bytecode <- generate program
+    executeBytecode opt bytecode
 
 main :: IO ()
 main = do
@@ -51,7 +85,5 @@ main = do
       Left err -> do
           putStrLn "Error(s) encountered:"
           putStrLn err
-      Right () -> do
-          putStrLn ""
-          putStrLn "Success"
+      Right () -> pure ()
 

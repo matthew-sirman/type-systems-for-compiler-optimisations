@@ -33,26 +33,36 @@ binop op getReg lhs rhs = do
 
 write :: MonadIRBuilder r m => Value r -> Value r -> m ()
 write val addr =
-    let valTy = dataType val
-        Pointer addrTy = dataType addr
-     in if valTy == addrTy
-           then addInstruction $ Write val addr valTy
-           else error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
+    case dataType addr of
+      Pointer addrTy ->
+        let valTy = dataType val
+            Pointer addrTy = dataType addr
+         in if valTy == addrTy
+               then addInstruction $ Write val addr valTy
+               else addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) (FirstOrder Void) -- error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
+      _ -> addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) (FirstOrder Void) -- error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
 
 read :: MonadIRBuilder r m => m r -> Value r -> m (Value r)
 read getReg addr = do
     reg <- getReg
-    let Pointer dt = dataType addr
-    addInstruction $ Read reg addr dt
-    pure (ValVariable dt reg)
+    case dataType addr of
+      Pointer dt -> do
+          addInstruction $ Read reg addr dt
+          pure (ValVariable dt reg)
+      ty -> do
+          addInstruction $ Read reg (ValImmediate Undef) (FirstOrder Void)
+          pure (ValImmediate Undef)
 
 getElementPtr :: MonadIRBuilder r m => m r -> Value r -> [Int] -> m (Value r)
 getElementPtr getReg src path = do
     reg <- getReg
-    let Pointer struct = dataType src
-        dt = findType struct path
-    addInstruction $ GetElementPtr reg src path
-    pure (ValVariable (Pointer dt) reg)
+    case dataType src of
+      Pointer struct -> do
+          addInstruction $ GetElementPtr reg src path
+          pure (ValVariable (Pointer (findType struct path)) reg)
+      ty -> do -- error $ "COMPILER ERROR: getelementptr on non-pointer type. " ++ show ty
+          addInstruction $ GetElementPtr reg (ValImmediate Undef) path
+          pure (ValImmediate Undef)
     where
         findType :: DataType -> [Int] -> DataType
         findType dt [] = dt

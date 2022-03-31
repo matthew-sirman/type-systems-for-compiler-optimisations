@@ -130,11 +130,17 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
             where
                 genBinding :: Binding -> Compiler (Integer, Value)
                 genBinding (LazyBinding name var (Lf captures [] body)) = do
-                    let thunkType = IR.Structure 
+                    currentBoundVars <- asks (^. nameMap)
+                    let captureTypes = map (IR.dataType . (currentBoundVars M.!) . varID) captures
+                        thunkType = IR.Structure 
                                         ( IR.NamedStruct B.thunkTagStruct
                                         : thunkFunc []
-                                        : map varType captures
+                                        : captureTypes
                                         )
+                        forcedType = IR.Pointer (IR.Structure
+                                                    [ IR.NamedStruct B.thunkTagStruct
+                                                    , varType var
+                                                    ])
 
                     thunkReg <- mkVar Strict
 
@@ -143,7 +149,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     -- still be added to the entry block!
                     -- We do this to get the name of thunk.
                     thunkArgReg <- mkArg Lazy
-                    let thunkArg = IR.ValVariable (varType var) thunkArgReg
+                    let thunkArg = IR.ValVariable forcedType thunkArgReg
                     thunkName <- createFreshThunk name [thunkArgReg]
 
                     -- Add an instruction to allocate the memory
@@ -158,7 +164,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     write (IR.ValFunction (thunkFunc []) thunkName) thunkPtr
                     zipWithM_ (writeCapture thunkVar) captures [2..]
 
-                    thunkObject <- bitcast (mkVar Lazy) thunkVar (varType var)
+                    thunkObject <- bitcast (mkVar Lazy) thunkVar forcedType
 
                     ----- THUNK -----
 
@@ -171,7 +177,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
 
                     -- Now, we run the regular, strict code generator for the body.
                     thunkResult <- local ( (nameMap %~ M.union closureVars)
-                                         . (nameMap %~ M.insert (varID var) thunkArg)
+                                         . (nameMap %~ M.insert (varID (baseVar var)) thunkArg)
                                          ) $ codegen body
 
                     -- Overwrite the thunk
@@ -187,7 +193,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     -- generator.
                     popFunction
 
-                    pure (varID var, thunkObject)
+                    pure (varID (baseVar var), thunkObject)
 
                 genBinding (LazyBinding name var (Lf [] args body)) = do
                     (argRegs, argVarMap) <- mapAndUnzipM makeArgument args
@@ -196,18 +202,21 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     let funcVal = IR.ValFunction (varType var) func
                     pushBlock
                     result <- local ( (nameMap %~ M.union varMap)
-                                    . (nameMap %~ M.insert (varID var) funcVal)
+                                    . (nameMap %~ M.insert (varID (baseVar var)) funcVal)
                                     ) $ codegen body
                     ret (Just result)
                     popBlock
                     popFunction
-                    pure (varID var, funcVal)
+                    pure (varID (baseVar var), funcVal)
 
                 genBinding (LazyBinding name var (Lf captures args body)) = do
                     let funcType = thunkFunc (map (varType . snd) args)
-                    let closureType = IR.Structure
+                    currentBoundVars <- asks (^. nameMap)
+                    let capVals = map ((currentBoundVars M.!) . varID) captures
+                        captureTypes = map IR.dataType capVals
+                        closureType = IR.Structure
                                           ( funcType
-                                          : map varType captures
+                                          : captureTypes
                                           )
                     clReg <- mkVar Strict
 
@@ -219,7 +228,6 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
 
                     funcName <- pushFunction name (clArgReg:argRegs)
 
-                    capVals <- mapM (\v -> asks ((M.! varID v) . (^. nameMap))) captures
                     -- let clVal = IR.ValStruct 
                     --                 ( IR.Value (IR.ValFunction funcType funcName)
                     --                 : map IR.Value capVals
@@ -239,18 +247,18 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
 
                     -- Now, we run the regular, strict code generator for the body.
                     result <- local ( (nameMap %~ M.union closureVars . M.union varMap)
-                                    . (nameMap %~ M.insert (varID var) clArgVar)
+                                    . (nameMap %~ M.insert (varID (baseVar var)) clArgVar)
                                     ) $ codegen body
 
                     ret (Just result)
 
                     popBlock
                     popFunction
-                    pure (varID var, clVar)
+                    pure (varID (baseVar var), clVar)
 
                 genBinding (EagerBinding _ var body) = do
-                    res <- local (recursiveStrict %~ S.insert var) $ codegen body
-                    pure (varID var, res)
+                    res <- local (recursiveStrict %~ S.insert (baseVar var)) $ codegen body
+                    pure (varID (baseVar var), res)
                     -- fst <$> unpackPattern (throw 1) pat res
 
                 writeCapture :: Value -> Var -> Int -> Compiler ()
@@ -266,12 +274,12 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     val <- read (mkVar evalType) addr
                     pure (varID v, val)
 
-                makeArgument :: (Bool, Var) -> Compiler (Variable, (Integer, Value))
+                makeArgument :: (Bool, TypedVar) -> Compiler (Variable, (Integer, Value))
                 makeArgument (eager, v) = do
                     arg <- if eager
                               then mkArg Strict
                               else mkArg Lazy
-                    pure (arg, (varID v, IR.ValVariable (varType v) arg))
+                    pure (arg, (varID (baseVar v), IR.ValVariable (varType v) arg))
 
         codegen (Case disc branches) = do
             discVal <- codegen disc
@@ -321,8 +329,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                 genLiteral (IntLiteral i) = pure (mkInt i)
                 genLiteral (RealLiteral r) = pure (IR.ValImmediate (IR.Real64 r))
 
-        codegen (PackedTuple vs) = do
-            let tupleType = IR.Structure (map IR.datatype vs)
+        codegen (PackedTuple tupleType vs) = do
             tuplePtr <- malloc (mkVar Strict) tupleType
             zipWithM_ (writeVal tuplePtr) vs [0..]
             pure tuplePtr
@@ -338,7 +345,6 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     write val elemPtr
 
         codegen (Projector offset v) = do
-            let elemType = varType v
             base <- lookupVar v
             forced <- forceCompute base
             addr <- getElementPtr (mkVar Strict) forced [offset]

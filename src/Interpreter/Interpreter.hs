@@ -32,12 +32,14 @@ makeLenses ''InterpreterState
 data InterpreterSettings = ISettings
     { _heapSize :: Word64
     , _debug :: Bool
+    , _showBytecode :: Bool
     }
 
 makeLenses ''InterpreterSettings
 
-defaultSettings = ISettings 65536 False
-debugMode = ISettings 65536 True
+defaultSettings, debugMode :: InterpreterSettings
+defaultSettings = ISettings 65536 False False
+debugMode = ISettings 65536 True True
 
 type Interpreter a = ExceptT Int (StateT InterpreterState IO) a
 
@@ -47,7 +49,8 @@ interpret settings bytecode = do
         putStrLn $ "Heap size: " ++ show (settings ^. heapSize)
         putStrLn $ "Registers: " ++ show (bytecode ^. registerCount)
         putStrLn ""
-        print bytecode
+        when (settings ^. showBytecode) $ do
+            print bytecode
         putStrLn "Running..."
     heapArray <- newArray (0, settings ^. heapSize - 1) 0
     regFileArray <- newArray (0, bytecode ^. registerCount - 1) 0
@@ -67,6 +70,7 @@ interpret settings bytecode = do
           when (settings ^. debug) $ do
               putStrLn $ "Total memory use: " ++ show (endState ^. allocated)
               putStrLn $ "Instructions executed: " ++ show (endState ^. instructionsExecuted)
+              putStrLn ""
               putStrLn "Result:"
           print (endState ^. returnVal)
       Left (-1) -> putStrLn "Ran out of heap memory!"
