@@ -167,7 +167,7 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
             popVarFrame
             -- Now we unify our updated view of the previously expected branch type with the newly
             -- inferred branch type.
-            unify (location branch) branchType (typeof typedBranch)
+            unifyLUB True (location branch) branchType (typeof typedBranch)
 
             pure (branchVSets, typedBranch)
 
@@ -183,6 +183,9 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
             checkRelevant
             popStackFrame
             pure (TypedCaseBranch pat typedBranch)
+
+        -- takeBounds :: Type -> Type -> Checker ()
+        -- takeBounds 
 
         -- We can see here that we fold each set through with either an intersection or union.
         --

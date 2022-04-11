@@ -335,7 +335,10 @@ createMulFor (MEAtom atom) = pure (MAtom atom)
 createMulFor (MEProd lhs rhs) = MProd <$> createMulFor lhs <*> createMulFor rhs
 
 unify :: SourceLocation -> Type -> Type -> Checker ()
-unify loc ta tb = do
+unify = unifyLUB False
+
+unifyLUB :: Bool -> SourceLocation -> Type -> Type -> Checker ()
+unifyLUB lub loc ta tb = do
     ra <- findTypeRep ta
     rb <- findTypeRep tb
     unify' ra rb
@@ -348,13 +351,13 @@ unify loc ta tb = do
             | g == g' = pure ()
             | otherwise = typeError $ GroundUnificationFailure loc g g'
         unify' (TypeApp con arg) (TypeApp con' arg') = do
-            unify loc con con'
-            unify loc arg arg'
+            unifyLUB lub loc con con'
+            unifyLUB lub loc arg arg'
         unify' (FunctionType from (Arrow arrow) to) (FunctionType from' (Arrow arrow') to') = do
-            unify loc from from'
-            mulUnify loc arrow arrow'
-            unify loc to to'
-        unify' (TupleType ts) (TupleType ts') = zipWithM_ (flip (unify loc)) ts ts'
+            unifyLUB lub loc from from'
+            unless lub $ mulUnify loc arrow arrow'
+            unifyLUB lub loc to to'
+        unify' (TupleType ts) (TupleType ts') = zipWithM_ (flip (unifyLUB lub loc)) ts ts'
         unify' t t' = typeError $ UnificationFailure loc t t'
 
 mulUnify :: SourceLocation -> Multiplicity -> Multiplicity -> Checker ()

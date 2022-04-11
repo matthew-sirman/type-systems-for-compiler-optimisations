@@ -16,6 +16,27 @@ import Data.Bits
 
 import Debug.Trace
 
+data ProgramStats = ProgramStats
+    { _instructionsExecuted :: Int
+    , _readsExecuted :: Int
+    , _writesExecuted :: Int
+    }
+
+makeLenses ''ProgramStats
+
+instance Show ProgramStats where
+    show stats =
+        "Instructions executed: " ++ show (stats ^. instructionsExecuted) ++ "\n" ++
+        "Reads executed: " ++ show (stats ^. readsExecuted) ++ "\n" ++
+        "Writes executed: " ++ show (stats ^. writesExecuted) ++ "\n"
+
+stats :: ProgramStats
+stats = ProgramStats
+    { _instructionsExecuted = 0
+    , _readsExecuted = 0
+    , _writesExecuted = 0
+    }
+
 data InterpreterState = InterpreterState
     { _heap :: IOArray Word64 Word8
     , _allocated :: Word64 
@@ -24,7 +45,7 @@ data InterpreterState = InterpreterState
     , _stack :: [Word64]
     , _returnVal :: Word64
     , _registerFile :: IOArray Word64 Word64
-    , _instructionsExecuted :: Word64
+    , _programStats :: ProgramStats
     }
 
 makeLenses ''InterpreterState
@@ -62,14 +83,14 @@ interpret settings bytecode = do
             , _stack = []
             , _returnVal = 0
             , _registerFile = regFileArray
-            , _instructionsExecuted = 0
+            , _programStats = stats
             }
     (programResult, endState) <- runStateT (runExceptT (forever (fetch >>= step))) initialState
     case programResult of
       Left 0 -> do
           when (settings ^. debug) $ do
               putStrLn $ "Total memory use: " ++ show (endState ^. allocated)
-              putStrLn $ "Instructions executed: " ++ show (endState ^. instructionsExecuted)
+              print (endState ^. programStats)
               putStrLn ""
               putStrLn "Result:"
           print (endState ^. returnVal)
@@ -82,7 +103,7 @@ interpret settings bytecode = do
             pc <- gets (^. programCounter)
             let instruction = (bytecode ^. instructions) ! pc
             modify (programCounter %~ (+1))
-            modify (instructionsExecuted %~ (+1))
+            modify (programStats . instructionsExecuted %~ (+1))
             pure instruction
 
 step :: BytecodeInstruction Word64 -> Interpreter ()
@@ -98,11 +119,13 @@ step (Write v addr size) = do
     outAddr <- fromIntegral <$> loadVal addr
     heapArray <- gets (^. heap)
     forM_ (zip [outAddr..outAddr + size - 1] (wordToBytes val)) (liftIO . uncurry (writeArray heapArray))
+    modify (programStats . writesExecuted %~ (+1))
 step (Read res loc size) = do
     inAddr <- fromIntegral <$> loadVal loc
     heapArray <- gets (^. heap)
     bytes <- forM [inAddr..inAddr + size - 1] (liftIO . readArray heapArray)
     storeVal res (bytesToWord bytes)
+    modify (programStats . readsExecuted %~ (+1))
 step (MAlloc res size) = do
     allocSize <- fromIntegral <$> loadVal size
     pointer <- gets (^. allocated)

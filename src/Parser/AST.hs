@@ -63,8 +63,6 @@ instance Hashable a => Hashable (Loc a)
 newtype Identifier = I String
     deriving (Eq, Ord, Generic)
 
-instance Hashable Identifier
-
 data Statement
     = TypeDecl (Loc Identifier) (Loc TypeExpr)
     | FuncDecl (Loc Identifier) (Loc ValExpr)
@@ -138,6 +136,14 @@ data MultiplicityAtom
 
 instance Show Identifier where
     show (I name) = name
+
+instance Hashable Identifier
+
+instance Semigroup Identifier where
+    I x <> I y = I (x <> y)
+
+instance Monoid Identifier where
+    mempty = I mempty
 
 ---------------------------------------
 --        Statement Instances        --

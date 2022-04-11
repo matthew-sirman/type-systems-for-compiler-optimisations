@@ -18,17 +18,18 @@ import Typing.Types
 
 import qualified Builtin.Codegen as B
 
-import qualified IR.DataType as IR
+-- import qualified IR.DataType as IR
 
 import qualified Data.List.NonEmpty as NE
 import Data.List (intercalate)
+import Data.Maybe (catMaybes, fromJust)
 import qualified Data.HashSet as S
 import qualified Data.HashMap.Strict as M
 import Data.Graph
 
 import Control.Monad.State
 import Control.Monad.Reader
-import Control.Lens
+import Control.Lens hiding (Strict, Lazy)
 
 import GHC.Generics (Generic)
 import Data.Hashable (Hashable(..))
@@ -39,30 +40,76 @@ import Parser.Parser
 import Debug.Trace
 import qualified Builtin.Builtin
 
-voidPtr :: IR.DataType
-voidPtr = IR.Pointer (IR.FirstOrder IR.Void)
+-- instance IR.DataTypeContainer T.Type where
+--     datatype (T.Poly _) = voidPtr
+--     datatype (T.Ground (P.I "Int")) = IR.FirstOrder IR.Int64T
+--     datatype (T.Ground (P.I "Real")) = IR.FirstOrder IR.Real64T
+--     datatype (T.FunctionType from _ to) =
+--         case IR.datatype to of
+--           IR.FunctionT res args -> IR.FunctionT res (IR.datatype from : args)
+--           res -> IR.FunctionT res [IR.datatype from]
+--     datatype (T.TupleType ts) = IR.Structure (map IR.datatype ts)
+--     datatype _ = error "Not yet implemented!"
+-- 
+-- instance IR.DataTypeContainer a => IR.DataTypeContainer (P.Literal a) where
+--     datatype (P.IntLiteral _) = IR.FirstOrder IR.Int64T
+--     datatype (P.RealLiteral _) = IR.FirstOrder IR.Real64T
+--     datatype (P.ListLiteral ls) = undefined
+--     datatype (P.TupleLiteral ts) = IR.Pointer (IR.Structure (map IR.datatype ts))
+-- 
+-- instance IR.DataTypeContainer T.Pattern where
+--     datatype (T.VariablePattern t _) = IR.datatype t
+--     datatype (T.ConstructorPattern _ ts) = IR.Structure (map IR.datatype ts)
+--     datatype (T.LiteralPattern lit) = IR.datatype lit
 
-instance IR.DataTypeContainer T.Type where
-    datatype (T.Poly _) = voidPtr
-    datatype (T.Ground (P.I "Int")) = IR.FirstOrder IR.Int64T
-    datatype (T.Ground (P.I "Real")) = IR.FirstOrder IR.Real64T
-    datatype (T.FunctionType from _ to) =
-        case IR.datatype to of
-          IR.FunctionT res args -> IR.FunctionT res (IR.datatype from : args)
-          res -> IR.FunctionT res [IR.datatype from]
-    datatype (T.TupleType ts) = IR.Structure (map IR.datatype ts)
-    datatype _ = error "Not yet implemented!"
+data Evaluation
+    = Strict
+    | Lazy
+    deriving (Eq, Generic)
 
-instance IR.DataTypeContainer a => IR.DataTypeContainer (P.Literal a) where
-    datatype (P.IntLiteral _) = IR.FirstOrder IR.Int64T
-    datatype (P.RealLiteral _) = IR.FirstOrder IR.Real64T
-    datatype (P.ListLiteral ls) = undefined
-    datatype (P.TupleLiteral ts) = IR.Pointer (IR.Structure (map IR.datatype ts))
+instance Hashable Evaluation
 
-instance IR.DataTypeContainer T.Pattern where
-    datatype (T.VariablePattern t _) = IR.datatype t
-    datatype (T.ConstructorPattern _ ts) = IR.Structure (map IR.datatype ts)
-    datatype (T.LiteralPattern lit) = IR.datatype lit
+class TranslateTyped a where
+    ttype :: a -> TranslateType
+
+data TranslateType
+    = IntT
+    | RealT
+    | Poly
+    | Tuple [TranslateType]
+    | Named P.Identifier
+    | Function TranslateType [TranslateType]
+    deriving Eq
+
+instance Show TranslateType where
+    show IntT = "int"
+    show RealT = "real"
+    show Poly = "<poly>"
+    show (Tuple ts) = "(" ++ intercalate ", " (map show ts) ++ ")"
+    show (Named name) = show name
+    show (Function res args) = show res ++ " (" ++ intercalate ", " (map show args) ++ ")"
+
+instance TranslateTyped T.Type where
+    ttype (T.Poly _) = Poly
+    ttype (T.Ground (P.I "Int")) = IntT
+    ttype (T.Ground (P.I "Real")) = RealT
+    ttype (T.FunctionType from _ to) =
+        case ttype to of
+          Function res args -> Function res (ttype from : args)
+          res -> Function res [ttype from]
+    ttype (T.TupleType ts) = Tuple (map ttype ts)
+    ttype _ = undefined
+
+instance TranslateTyped a => TranslateTyped (P.Literal a) where
+    ttype (P.IntLiteral _) = IntT
+    ttype (P.RealLiteral _) = RealT
+    ttype (P.ListLiteral _) = undefined
+    ttype (P.TupleLiteral ts) = Tuple (map ttype ts)
+
+instance TranslateTyped T.Pattern where
+    ttype (T.VariablePattern t _) = ttype t
+    ttype (T.ConstructorPattern _ ts) = undefined
+    ttype (T.LiteralPattern lit) = ttype lit
 
 newtype Var = V
     { varID :: Integer
@@ -79,7 +126,7 @@ instance Hashable Var -- where
 
 data TypedVar = TV
     { baseVar :: Var
-    , varType :: IR.DataType
+    , varType :: TranslateType
     }
     deriving Eq
 
@@ -90,8 +137,8 @@ instance Hashable TypedVar where
     hashWithSalt salt = hashWithSalt salt . baseVar
     hash = hash . baseVar
 
-instance IR.DataTypeContainer TypedVar where
-    datatype = varType
+-- instance IR.DataTypeContainer TypedVar where
+--     datatype = varType
 
 data PrimitiveLiteral
     = IntLiteral Int
@@ -101,9 +148,13 @@ instance Show PrimitiveLiteral where
     show (IntLiteral i) = show i
     show (RealLiteral r) = show r
 
-instance IR.DataTypeContainer PrimitiveLiteral where
-    datatype (IntLiteral _) = IR.FirstOrder IR.Int64T
-    datatype (RealLiteral _) = IR.FirstOrder IR.Real64T
+instance TranslateTyped PrimitiveLiteral where
+    ttype (IntLiteral _) = IntT
+    ttype (RealLiteral _) = RealT
+
+-- instance IR.DataTypeContainer PrimitiveLiteral where
+--     datatype (IntLiteral _) = IR.FirstOrder IR.Int64T
+--     datatype (RealLiteral _) = IR.FirstOrder IR.Real64T
 
 data Atom
     = Var Var
@@ -124,32 +175,32 @@ data CodegenExpr
     | PrimApp P.Identifier [Atom]
     | ConsApp P.Identifier [Atom]
     | Literal PrimitiveLiteral
-    | PackedTuple IR.DataType [Atom]
+    | PackedTuple [Atom]
     | Projector Int Var
     | Free Var CodegenExpr
-    -- | Error
+    | Error
 
 instance Show CodegenExpr where
-    show (Let bindings body) = "let " ++ intercalate " and " (map show bindings) ++ " in " ++ show body
+    show (Let bindings body) = "let {" ++ intercalate " and " (map show bindings) ++ "} in " ++ show body
     show (Case disc branches) = "case " ++ show disc ++ " of " ++ foldMap (('\n' :) . show) branches
     show (Application fun args) = show fun ++ " {" ++ intercalate ", " (map show args) ++ "}"
     show (PrimApp fun args) = show fun ++ " {" ++ intercalate ", " (map show args) ++ "}"
     show (ConsApp fun args) = show fun ++ " {" ++ intercalate ", " (map show args) ++ "}"
     show (Literal lit) = show lit
-    show (PackedTuple _ vs) = "(" ++ intercalate ", " (map show vs) ++ ")"
+    show (PackedTuple vs) = "(" ++ intercalate ", " (map show vs) ++ ")"
     show (Projector i v) = "sel-" ++ show i ++ " " ++ show v
     show (Free v expr) = "free " ++ show v ++ "; (" ++ show expr ++ ")"
-    -- show Error = "error"
+    show Error = "error"
 
 data Binding
     = LazyBinding (Maybe P.Identifier) TypedVar LambdaForm
-    | EagerBinding (Maybe P.Identifier) TypedVar CodegenExpr
+--    | EagerBinding (Maybe P.Identifier) TypedVar CodegenExpr
 
 instance Show Binding where
     show (LazyBinding (Just (P.I n)) v lf) = show v ++ "[" ++ n ++ "] = " ++ show lf
     show (LazyBinding Nothing v lf) = show v ++ " = " ++ show lf
-    show (EagerBinding (Just (P.I n)) v expr) = show v ++ "[" ++ n ++ "] = " ++ show expr
-    show (EagerBinding Nothing p expr) = show p ++ " = " ++ show expr
+--     show (EagerBinding (Just (P.I n)) v expr) = show v ++ "[" ++ n ++ "] = " ++ show expr
+--     show (EagerBinding Nothing p expr) = show p ++ " = " ++ show expr
 
 -- data AtomPattern
 --     = VarPattern Var
@@ -167,7 +218,7 @@ data Pattern
     = VarPattern Var
     | LitPattern PrimitiveLiteral
     -- = AtomPattern AtomPattern
-    | ConsPattern IR.DataType P.Identifier [Pattern]
+    | ConsPattern P.Identifier [Pattern]
     | TuplePattern [Pattern]
     -- | Ignore
 
@@ -175,9 +226,15 @@ instance Show Pattern where
     show (VarPattern v) = show v
     show (LitPattern lit) = show lit
     -- show (AtomPattern p) = show p
-    show (ConsPattern _ name ps) = "(" ++ show name ++ concatMap ((' ':) . show) ps ++ ")"
+    show (ConsPattern name ps) = "(" ++ show name ++ concatMap ((' ':) . show) ps ++ ")"
     show (TuplePattern ts) = "(" ++ intercalate ", " (map show ts) ++ ")"
     -- show Ignore = "_"
+
+-- instance TranslateTyped Pattern where
+--     ttype (VarPattern tv) = varType tv
+--     ttype (LitPattern lit) = ttype lit
+--     ttype (ConsPattern {}) = undefined
+--     ttype (TuplePattern ts) = Tuple (map ttype ts)
 
 -- instance IR.DataTypeContainer Pattern where
 --     datatype (VarPattern v) = IR.datatype v
@@ -191,7 +248,11 @@ data LambdaForm = Lf [Var] [(Bool, TypedVar)] CodegenExpr
 
 instance Show LambdaForm where
     show (Lf captures args body) = "{" ++ intercalate ", " (map show captures) ++ "} \\{" 
-        ++ intercalate ", " (map (show . snd) args) ++ "} -> " ++ show body
+        ++ intercalate ", " (map showArg args) ++ "} -> " ++ show body
+        where
+            showArg :: (Bool, TypedVar) -> String
+            showArg (True, var) = '!' : show var
+            showArg (False, var) = show var
 
 data Alternative = Alt Pattern CodegenExpr
 
@@ -201,12 +262,12 @@ instance Show Alternative where
 -- failAlt :: Alternative
 -- failAlt = Alt Ignore Error
 
-type IdMap = M.HashMap P.Identifier Var
+type IdMap = M.HashMap P.Identifier (Var, Var)
 
 data TranslatorContext = TranslatorContext
     { _idMap :: IdMap
     , _bound :: S.HashSet Var
-    , _eager :: Bool
+    , _guaranteed :: Bool
     }
 
 makeLenses ''TranslatorContext
@@ -230,10 +291,10 @@ type BindingBuilder a = StateT BindingBuilderState (ReaderT TranslatorContext (S
 findFVs :: CodegenExpr -> Translator (S.HashSet Var)
 findFVs (Let bindings body) =
     let extractName (LazyBinding _ v _) = S.singleton (baseVar v)
-        extractName (EagerBinding _ v _) = S.singleton (baseVar v)
+        -- extractName (EagerBinding _ v _) = S.singleton (baseVar v)
         findBindFVs (LazyBinding _ _ (Lf _ binds e)) =
             local (bound %~ S.union (S.fromList (map (baseVar . snd) binds))) $ findFVs e
-        findBindFVs (EagerBinding _ _ e) = findFVs e
+        -- findBindFVs (EagerBinding _ _ e) = findFVs e
         allNames = S.unions (map extractName bindings)
      in local (bound %~ S.union allNames) $ do
         bindingFVs <- mapM findBindFVs bindings
@@ -251,7 +312,7 @@ findFVs (Application fun args) = do
 findFVs (PrimApp _ args) = S.unions <$> mapM checkAtom args
 findFVs (ConsApp _ args) = S.unions <$> mapM checkAtom args
 findFVs (Literal lit) = pure S.empty
-findFVs (PackedTuple _ ts) = S.unions <$> mapM checkAtom ts
+findFVs (PackedTuple ts) = S.unions <$> mapM checkAtom ts
 findFVs (Projector _ v) = checkFV v
 findFVs (Free _ expr) = findFVs expr
 
@@ -274,168 +335,343 @@ namesInPattern :: Pattern -> S.HashSet Var
 namesInPattern (VarPattern v) = S.singleton v
 namesInPattern (LitPattern _) = S.empty
 -- namesInPattern (AtomPattern atom) = namesInAtom atom
-namesInPattern (ConsPattern _ _ ps) = S.unions (map namesInPattern ps)
+namesInPattern (ConsPattern _ ps) = S.unions (map namesInPattern ps)
 namesInPattern (TuplePattern ts) = S.unions (map namesInPattern ts)
-
-thunkFunc :: [IR.DataType] -> IR.DataType
-thunkFunc args = IR.FunctionT (IR.FirstOrder IR.Void) (thunkArg : args)
-    where
-        thunkArg :: IR.DataType
-        thunkArg = IR.Pointer (IR.Structure [IR.NamedStruct B.thunkTagStruct, voidPtr])
 
 convertAST :: T.TypedExpr -> T.MultiplicityPoset -> CodegenExpr
 convertAST expr poset =
     let initCtx = TranslatorContext
             { _idMap = M.empty
             , _bound = S.empty
-            , _eager = True
+            , _guaranteed = True
             }
         initState = TranslatorState
             { _nextVar = 0
             }
-     in evalState (runReaderT (convert expr) initCtx) initState
+     in finalise (evalState (runReaderT (convert expr) initCtx) initState)
     where
+        finalise :: CodegenExpr -> CodegenExpr
+        finalise (Let binds expr) = Let (map finaliseBind binds) (finalise expr)
+            where
+                finaliseBind :: Binding -> Binding
+                finaliseBind (LazyBinding name v (Lf caps args body)) =
+                    LazyBinding name v (Lf (filter (/= baseVar v) caps) args (finalise body))
+        finalise (Case disc bs) = Case (finalise disc) (NE.map finaliseAlt bs)
+            where
+                finaliseAlt :: Alternative -> Alternative
+                finaliseAlt (Alt pat body) = Alt pat (finalise body)
+        finalise expr = expr
+
         convert :: T.TypedExpr -> Translator CodegenExpr
         convert (T.Let _ bindings body) = do
-            (primaryBindings, projectors, names) <- unzip3 <$> mapM createBind bindings
-            let allBoundNames = M.unions names
-            local (idMap %~ M.union allBoundNames) $ do
-                primary <- zipWithM (\bind nms ->
-                    local (bound %~ S.union (S.fromList (M.elems nms))) bind) primaryBindings names
-                let allBindings = primary ++ concat projectors
-                graph <- buildOrderGraph allBindings
+            gu <- asks (^. guaranteed)
+            (makeBinds, ids) <- createBindings gu bindings
+            local (idMap %~ M.union ids) $ do
+                (binds, projection) <- makeBinds
+                graph <- buildOrderGraph binds
                 cvtBody <- convert body
-                pure (buildLetPath cvtBody (stronglyConnComp graph))
+                pure (buildLetPath (projection cvtBody) (stronglyConnComp graph))
+            -- let allBoundNames = M.unions names
+            -- local (idMap %~ M.union allBoundNames) $ do
+            --     primary <- zipWithM (\bind nms ->
+            --         local (bound %~ S.union (S.fromList (M.elems nms))) bind) primaryBindings names
+            --     let allBindings = primary ++ concat projectors
+            --     graph <- buildOrderGraph allBindings
+            --     cvtBody <- convert body
+            --     pure (buildLetPath cvtBody (stronglyConnComp graph))
             where
-                createBind :: T.TypedLetBinding
-                           -> Translator (Translator Binding, [Binding], IdMap)
-                createBind (T.TypedLetBinding mul (T.VariablePattern t name) expr) = do
-                    bindVar <- freshName
-                    let bindTVar = TV bindVar (IR.datatype t)
-                        bind = if isEager mul
-                                  then EagerBinding (Just name) bindTVar <$>
-                                           local (eager .~ True) (convert expr)
-                                  else LazyBinding (Just name) bindTVar <$>
-                                           local (eager .~ False) (convertLambdas expr)
-                    pure (bind, [], M.singleton name bindVar)
-                createBind (T.TypedLetBinding mul pat@(T.LiteralPattern (P.TupleLiteral ts)) expr)
-                    | all isVarPattern ts = do
+                createBindings :: Bool -> [T.TypedLetBinding]
+                               -> Translator (Translator ([Binding], CodegenExpr -> CodegenExpr), IdMap)
+                createBindings _ [] = pure (pure ([], id), M.empty)
+                createBindings gu ((T.TypedLetBinding mul pat@(T.VariablePattern t name) expr):binds)
+                    -- Strict functions generate only strict
+                    | isFunctionType t && ((isRelevant mul && gu) || nonDataHolder t) = do
+                        (strictFunc, strictBindVar) <- makeFunc pat expr True
+                        (restBinds, ids) <- createBindings gu binds
+                        pure (addBinding strictFunc restBinds, M.insert name (strictBindVar, strictBindVar) ids)
+                    -- Functions which are non strict should generate
+                    -- both strict and non strict thunks (with no projectors)
+                    | isFunctionType t && not (isRelevant mul && gu) = do
+                        (strictFunc, strictBindVar) <- makeFunc pat expr True
+                        (nonStrictFunc, nonStrictBindVar) <- makeFunc pat expr False
+                        (restBinds, ids) <- createBindings gu binds
+                        let binds' = addBinding nonStrictFunc restBinds
+                            binds'' = addBinding strictFunc binds'
+                            ids' = M.insert name (strictBindVar, nonStrictBindVar) ids
+                        pure (binds'', ids')
+                createBindings gu ((T.TypedLetBinding mul pattern expr):binds)
+                    -- All other strict patterns should add a case expression to the binding body
+                    | isRelevant mul && gu = do
+                        (p, patIds) <- convertPattern pattern
+                        let patIds' = M.map (\v -> (baseVar v, baseVar v)) patIds
+                            addedNameSet = M.keysSet patIds
+                            caseExpr = do
+                                cvtExpr <- local (idMap %~ M.filterWithKey (\k _ -> not (k `S.member` addedNameSet))) $ convert expr
+                                pure (Case cvtExpr . NE.singleton . Alt p)
+                        (restBinds, ids) <- createBindings gu binds
+                        pure (addPatternMatch caseExpr restBinds, M.union patIds' ids)
+                    -- Lazy patterns which can be directly projected from generate
+                    -- non strict thunks and projectors
+                    | directProjection pattern = do
+                        (nonStrictFunc, nonStrictBindVar) <- makeFunc pattern expr False
+                        (restBinds, ids) <- createBindings gu binds
+                        case pattern of
+                          T.VariablePattern t name -> do
+                              pure (addBinding nonStrictFunc restBinds,
+                                    M.insert name (nonStrictBindVar, nonStrictBindVar) ids)
+                          T.LiteralPattern (P.TupleLiteral ts) -> do
+                              projVars <- forM ts $ \(T.VariablePattern t name) -> do
+                                  projVar <- freshName
+                                  pure (name, TV projVar (ttype t))
+                              foldM (addProjector nonStrictBindVar)
+                                  (addBinding nonStrictFunc restBinds, ids) (zip projVars [0..])
+                    -- Non-trivial patterns generate non strict thunks which
+                    -- extract values and non strict projectors
+                    | otherwise = do
                         bindVar <- freshName
-                        vars <- mapM (const freshName) ts
-                        let bindTVar = TV bindVar (IR.datatype pat)
-                            bind = if isEager mul
-                                      then EagerBinding Nothing bindTVar <$>
-                                               local (eager .~ True) (convert expr)
-                                      else LazyBinding Nothing bindTVar <$>
-                                               local (eager .~ False) (convertLambdas expr)
-                        (ids, projectors) <- unzip <$> zipWithM (makeProjectorBinding bindVar) [0..] ts
-                        pure (bind, projectors, M.fromList ids)
+                        (p, patIds) <- convertPattern pattern
+                        (restBinds, ids) <- createBindings gu binds
+                        let patList = M.toList patIds
+                            extractExpr = do
+                                (Lf caps args cvtExpr) <- convertLambdas expr
+                                let tupleType = Tuple (map (varType . snd) patList)
+                                    match = Alt p (PackedTuple (map (Var . baseVar . snd) patList))
+                                    extractor = Case cvtExpr (NE.singleton match)
+                                pure (LazyBinding Nothing (TV bindVar tupleType) (Lf caps args extractor))
+                            binds' = addBinding extractExpr restBinds
+                        foldM (addProjector bindVar) (binds', ids) (zip patList [0..])
                     where
-                        makeProjectorBinding :: Var -> Int -> T.Pattern
-                                             -> Translator ((P.Identifier, Var), Binding)
-                        makeProjectorBinding capture index (T.VariablePattern t v)
-                            | isEager mul = do
-                                bind <- freshName
-                                let proj = Projector index capture
-                                    binding = EagerBinding (Just v) (TV bind (IR.datatype t)) proj
-                                pure ((v, bind), binding)
-                            | otherwise = do
-                                bind <- freshName
-                                let proj = Lf [capture] [] (Projector index capture)
-                                    binding = LazyBinding (Just v) (TV bind (IR.datatype t)) proj
-                                pure ((v, bind), binding)
-                createBind (T.TypedLetBinding mul pat expr) = do
+                        addProjector :: Var
+                                     -> (Translator ([Binding], CodegenExpr -> CodegenExpr), IdMap)
+                                     -> ((P.Identifier, TypedVar), Int)
+                                     -> Translator (Translator ([Binding], CodegenExpr -> CodegenExpr), IdMap)
+                        addProjector var (binds, ids) ((name, projVar), index) = do
+                            let lf = Lf [var] [] (Projector index var)
+                                binding = LazyBinding (Just name) projVar lf
+                                binds' = addBinding (pure binding) binds
+                                ids' = M.insert name (baseVar projVar, baseVar projVar) ids
+                            pure (binds', ids')
+
+                    -- | directProjection pattern = do
+                    --     (pat, patIds) <- convertPattern pattern
+                    --     primaryBindVar <- freshName
+                    --     let patVarList = M.toList patIds
+                    --         primaryBinding
+                    --             = LazyBinding (nameForPattern pattern) (TV primaryBindVar (ttype pattern)) <$> convertLambdas expr
+                    --     makeProjectors primaryBinding patVarList
+                    -- | otherwise = do
+                    --     (pat, patIds) <- convertPattern pattern
+                    --     primaryBindVar <- freshName
+                    --     let patVarList = M.toList patIds
+                    --         caseExpr = do
+                    --             disc <- convertLambdas expr
+                    --             pure
+                    --         primaryBinding =
+                    --             LazyBinding (nameForPattern pattern) (TV primaryBindVar _) <$> convertLambdas expr
+                    --     undefined
+
+                makeFunc :: T.Pattern -> T.TypedExpr -> Bool -> Translator (Translator Binding, Var)
+                makeFunc pattern expr gu = do
                     bindVar <- freshName
-                    packedVar <- freshName
-                    let initState = BindingBuilderState
-                            { _varsBound = []
-                            }
-                    (unpack, bbs) <- runStateT (reformPattern bindVar pat) initState
-                    case bbs ^. varsBound of
-                      -- [] -> do
-                      --     let pvType = IR.Pointer (IR.Structure [])
-                      --         varExtractor = unpack (PackedTuple pvType [])
+                    let name' = ((if gu then P.I "_@strict_" else mempty) <>) <$> nameForPattern pattern
+                        binding = do
+                            lf <- local (guaranteed .~ gu) $ convertLambdas expr
+                            pure (LazyBinding name' (TV bindVar (ttype pattern)) lf)
+                    pure (binding, bindVar)
 
-                      --     pure (makeLetBinding (TV packedVar (wrapType pvType)) bindVar varExtractor, [], M.empty)
-                      [(v, name)] -> do
-                          let pvType = varType v
-                              varExtractor = unpack (Application (baseVar v) [])
+                isFunctionType :: T.Type -> Bool
+                isFunctionType (T.FunctionType {}) = True
+                isFunctionType _ = False
 
-                          pure (makeLetBinding (Just name) (TV packedVar pvType) varExtractor, [], M.singleton name packedVar)
-                      vs -> do
-                          let pvStruct = IR.Structure (map (varType . fst) vs)
-                              pvType = IR.Pointer pvStruct
-                          nameMap <- mapM createNewVar vs
-                          let projBinds = zipWith (createProjBinding packedVar) nameMap [0..]
-                              varExtractor = unpack (PackedTuple pvStruct (map (Var . baseVar . fst) vs))
+                nonDataHolder :: T.Type -> Bool
+                nonDataHolder (T.FunctionType _ _ to) = nonDataHolder to
+                nonDataHolder (T.Ground (P.I "Int")) = True
+                nonDataHolder _ = False
 
-                          pure (makeLetBinding Nothing (TV packedVar pvType) varExtractor, projBinds, M.fromList (map (baseVar <$>) nameMap))
-                    where
-                        createNewVar :: (TypedVar, P.Identifier) -> Translator (P.Identifier, TypedVar)
-                        createNewVar (v, name) = do
-                            v' <- freshName
-                            pure (name, TV v' (varType v))
+                -- createBindings gu ((T.TypedLetBinding mul (T.VariablePattern t name) expr@(T.Lambda {})):binds) = do
+                --     -- TODO: Add "sum-of-units type" check
+                --     isGuaranteed <- asks (^. guaranteed)
+                --     (strictFunc, strictVar) <- mkFunc True
+                --     (restBinds, ids) <- createBindings binds
+                --     let addedStrict = addBinding (Just strictFunc) (pure id) restBinds
+                --     if relevant mul && isGuaranteed
+                --        then pure (addedStrict, M.insert name (strictVar, strictVar) ids)
+                --        else do
+                --            (nonStrictFunc, nonStrictVar) <- mkFunc False
+                --            undefiend
+                --     where
+                -- createBindings gu ((T.TypedLetBinding mul pat expr):binds) = do
+                --     isGuaranteed <- asks (^. guaranteed)
+                --     if isGuaranteed
+                --        then undefined
+                --        else undefined undefined
+                --     undefined
 
-                        createProjBinding :: Var -> (P.Identifier, TypedVar) -> Int -> Binding
-                        createProjBinding capture (name, bindVar) index
-                            | isEager mul = EagerBinding (Just name) bindVar proj
-                            | otherwise = LazyBinding (Just name) bindVar (Lf [capture] [] proj)
-                            where
-                                proj :: CodegenExpr
-                                proj = Projector index capture
+                addBinding :: Translator Binding
+                           -> Translator ([Binding], CodegenExpr -> CodegenExpr)
+                           -> Translator ([Binding], CodegenExpr -> CodegenExpr)
+                addBinding getBind getBinds = do
+                    bind <- getBind
+                    (binds, fn) <- getBinds
+                    pure (bind:binds, fn)
 
-                        makeLetBinding :: Maybe P.Identifier -> TypedVar -> (CodegenExpr -> CodegenExpr)
-                                       -> Translator Binding
-                        makeLetBinding name packedVar varExtractor
-                            | isEager mul = do
-                                cvtExpr <- local (eager .~ True) $ convert expr
-                                -- pure (EagerBinding (nameForPattern pat) bindVar (insertExpr varExtractor cvtExpr))
-                                pure (EagerBinding name packedVar (varExtractor cvtExpr))
-                            | otherwise = do
-                                (Lf caps args cvtExpr) <- local (eager .~ False) $ convertLambdas expr
-                                let lambdaForm = Lf caps args (varExtractor cvtExpr)
-                                pure (LazyBinding name packedVar lambdaForm)
+                addPatternMatch :: Translator (CodegenExpr -> CodegenExpr)
+                                -> Translator ([Binding], CodegenExpr -> CodegenExpr)
+                                -> Translator ([Binding], CodegenExpr -> CodegenExpr)
+                addPatternMatch getFn getBinds = do
+                    fn <- getFn
+                    (binds, fn') <- getBinds
+                    pure (binds, fn . fn')
+
+                -- createEagerBind :: T.TypedLetBinding
+                --                 -> Translator (Translator (CodegenExpr -> CodegenExpr), IdMap)
+                -- createEagerBind (T.TypedLetBinding _ (T.VariablePattern t name) expr@(T.Lambda {})) = do
+                --     bindVar <- freshName
+                --     undefined
+                -- createEagerBind (T.TypedLetBinding _ pattern expr) = do
+                --     (p, ids) <- convertPattern pattern
+                --     let caseExpr = do
+                --             cvtExpr <- convert expr
+                --             pure (Case cvtExpr . NE.singleton . Alt p)
+                --     pure (caseExpr, ids)
+
+                -- createLazyBind :: T.TypedLetBinding -> Translator (Translator Binding, [Binding], IdMap)
+                -- createLazyBind (T.TypedLetBinding _ (T.VariablePattern t name) expr) = do
+                --     bindVar <- freshName
+                --     let bind = do
+                --             lambdaForm <- convertLambdas expr
+                --             pure (LazyBinding (Just name) (TV bindVar (ttype t)) lambdaForm)
+                --     pure (bind, [], M.singleton name (bindVar, bindVar))
+
+                -- createBind :: T.TypedLetBinding
+                --            -> Translator (Maybe (Translator Binding, [Binding]), CodegenExpr -> CodegenExpr, IdMap)
+                -- createBind (T.TypedLetBinding mul (T.VariablePattern t name) expr) = do
+                --     bindVar <- freshName
+                --     let bindTVar = TV bindVar (ttype eval t)
+                --         bind = if isEager mul
+                --                   then EagerBinding (Just name) bindTVar <$>
+                --                            local (eager .~ True) (convert expr)
+                --                   else LazyBinding (Just name) bindTVar <$>
+                --                            local (eager .~ False) (convertLambdas expr)
+                --     pure (bind, [], M.singleton name bindVar)
+                -- createBind (T.TypedLetBinding mul pat@(T.LiteralPattern (P.TupleLiteral ts)) expr)
+                --     | all isVarPattern ts = do
+                --         bindVar <- freshName
+                --         vars <- mapM (const freshName) ts
+                --         let bindTVar = TV bindVar (ttype eval pat)
+                --             bind = if isEager mul
+                --                       then EagerBinding Nothing bindTVar <$>
+                --                                local (eager .~ True) (convert expr)
+                --                       else LazyBinding Nothing bindTVar <$>
+                --                                local (eager .~ False) (convertLambdas expr)
+                --         (ids, projectors) <- unzip <$> zipWithM (makeProjectorBinding bindVar) [0..] ts
+                --         pure (bind, projectors, M.fromList ids)
+                --     where
+                --         makeProjectorBinding :: Var -> Int -> T.Pattern
+                --                              -> Translator ((P.Identifier, Var), Binding)
+                --         makeProjectorBinding capture index (T.VariablePattern t v)
+                --             | isEager mul = do
+                --                 bind <- freshName
+                --                 let proj = Projector index capture
+                --                     binding = EagerBinding (Just v) (TV bind (ttype eval t)) proj
+                --                 pure ((v, bind), binding)
+                --             | otherwise = do
+                --                 bind <- freshName
+                --                 let proj = Lf [capture] [] (Projector index capture)
+                --                     binding = LazyBinding (Just v) (TV bind (ttype eval t)) proj
+                --                 pure ((v, bind), binding)
+                -- createBind (T.TypedLetBinding mul pat expr) = do
+                --     bindVar <- freshName
+                --     packedVar <- freshName
+                --     let initState = BindingBuilderState
+                --             { _varsBound = []
+                --             }
+                --     (unpack, bbs) <- runStateT (reformPattern bindVar pat) initState
+                --     case bbs ^. varsBound of
+                --       -- [] -> do
+                --       --     let pvType = IR.Pointer (IR.Structure [])
+                --       --         varExtractor = unpack (PackedTuple pvType [])
+
+                --       --     pure (makeLetBinding (TV packedVar (wrapType pvType)) bindVar varExtractor, [], M.empty)
+                --       [(v, name)] -> do
+                --           let pvType = varType v
+                --               varExtractor = unpack (Application (baseVar v) [])
+
+                --           pure (makeLetBinding (Just name) (TV packedVar pvType) varExtractor, [], M.singleton name packedVar)
+                --       vs -> do
+                --           let pvType = Tuple (map (varType . fst) vs)
+                --           nameMap <- mapM createNewVar vs
+                --           let projBinds = zipWith (createProjBinding packedVar) nameMap [0..]
+                --               varExtractor = unpack (PackedTuple pvType (map (Var . baseVar . fst) vs))
+
+                --           pure (makeLetBinding Nothing (TV packedVar pvType) varExtractor, projBinds, M.fromList (map (baseVar <$>) nameMap))
+                --     where
+                --         createNewVar :: (TypedVar, P.Identifier) -> Translator (P.Identifier, TypedVar)
+                --         createNewVar (v, name) = do
+                --             v' <- freshName
+                --             pure (name, TV v' (varType v))
+
+                --         createProjBinding :: Var -> (P.Identifier, TypedVar) -> Int -> Binding
+                --         createProjBinding capture (name, bindVar) index
+                --             | isEager mul = EagerBinding (Just name) bindVar proj
+                --             | otherwise = LazyBinding (Just name) bindVar (Lf [capture] [] proj)
+                --             where
+                --                 proj :: CodegenExpr
+                --                 proj = Projector index capture
+
+                --         makeLetBinding :: Maybe P.Identifier -> TypedVar -> (CodegenExpr -> CodegenExpr)
+                --                        -> Translator Binding
+                --         makeLetBinding name packedVar varExtractor
+                --             | isEager mul = do
+                --                 cvtExpr <- local (eager .~ True) $ convert expr
+                --                 -- pure (EagerBinding (nameForPattern pat) bindVar (insertExpr varExtractor cvtExpr))
+                --                 pure (EagerBinding name packedVar (varExtractor cvtExpr))
+                --             | otherwise = do
+                --                 (Lf caps args cvtExpr) <- local (eager .~ False) $ convertLambdas expr
+                --                 let lambdaForm = Lf caps args (varExtractor cvtExpr)
+                --                 pure (LazyBinding name packedVar lambdaForm)
+
+                directProjection :: T.Pattern -> Bool
+                directProjection (T.VariablePattern {}) = True
+                directProjection (T.LiteralPattern (P.TupleLiteral ts)) = all isVarPattern ts
+                directProjection _ = False
 
                 isVarPattern :: T.Pattern -> Bool
                 isVarPattern (T.VariablePattern {}) = True
                 isVarPattern _ = False
 
-                reformPattern :: Var -> T.Pattern -> BindingBuilder (CodegenExpr -> CodegenExpr -> CodegenExpr)
-                reformPattern bv (T.VariablePattern t v) = do
-                    modify (varsBound %~ ((TV bv (IR.datatype t), v):))
-                    pure const
-                reformPattern bv (T.ConstructorPattern name ps) = undefined
-                reformPattern bv (T.LiteralPattern lit) = reformPatternLit lit
+                -- reformPattern :: Var -> T.Pattern -> BindingBuilder (CodegenExpr -> CodegenExpr -> CodegenExpr)
+                -- reformPattern bv (T.VariablePattern t v) = do
+                --     modify (varsBound %~ ((TV bv (ttype eval t), v):))
+                --     pure const
+                -- reformPattern bv (T.ConstructorPattern name ps) = undefined
+                -- reformPattern bv (T.LiteralPattern lit) = reformPatternLit lit
 
-                reformPatternLit :: P.Literal T.Pattern
-                                 -> BindingBuilder (CodegenExpr -> CodegenExpr -> CodegenExpr)
-                reformPatternLit (P.IntLiteral i) = do
-                    let pattern = LitPattern (IntLiteral i)
-                        match rest disc = Case disc (NE.singleton (Alt pattern rest))
-                    pure match
-                reformPatternLit (P.RealLiteral r) = do
-                    let pattern = LitPattern (RealLiteral r)
-                        match rest disc = Case disc (NE.singleton (Alt pattern rest))
-                    pure match
-                reformPatternLit (P.ListLiteral ls) = undefined
-                reformPatternLit (P.TupleLiteral ts) = do
-                    tempVars <- lift $ mapM (const freshName) ts
-                    subPatCombinators <- zipWithM reformPattern tempVars ts
-                    let subMatches = zipWith flip subPatCombinators [Application v [] | v <- tempVars]
-                        pattern = TuplePattern (map VarPattern tempVars)
-                        match rest disc = Case disc (NE.singleton (Alt pattern (foldr id rest subMatches)))
-                    pure match
-
-                createNameMap :: (CodegenExpr, BindingBuilderState) -> Translator IdMap
-                createNameMap (_, bb)
-                    | null (bb ^. varsBound) = pure M.empty
+                -- reformPatternLit :: P.Literal T.Pattern
+                --                  -> BindingBuilder (CodegenExpr -> CodegenExpr -> CodegenExpr)
+                -- reformPatternLit (P.IntLiteral i) = do
+                --     let pattern = LitPattern (IntLiteral i)
+                --         match rest disc = Case disc (NE.singleton (Alt pattern rest))
+                --     pure match
+                -- reformPatternLit (P.RealLiteral r) = do
+                --     let pattern = LitPattern (RealLiteral r)
+                --         match rest disc = Case disc (NE.singleton (Alt pattern rest))
+                --     pure match
+                -- reformPatternLit (P.ListLiteral ls) = undefined
+                -- reformPatternLit (P.TupleLiteral ts) = do
+                --     tempVars <- lift $ mapM (const freshName) ts
+                --     subPatCombinators <- zipWithM reformPattern tempVars ts
+                --     let subMatches = zipWith flip subPatCombinators [Application v [] | v <- tempVars]
+                --         pattern = TuplePattern (map VarPattern tempVars)
+                --         match rest disc = Case disc (NE.singleton (Alt pattern (foldr id rest subMatches)))
+                --     pure match
 
                 buildOrderGraph :: [Binding] -> Translator [(Binding, Integer, [Integer])]
                 buildOrderGraph [] = pure []
-                buildOrderGraph (bind@(EagerBinding _ v body):bs) = do
-                    fvs <- findFVs body
-                    let node = (bind, (varID . baseVar) v, map varID (S.toList fvs))
-                    (node:) <$> buildOrderGraph bs
+                -- buildOrderGraph (bind@(EagerBinding _ v body):bs) = do
+                --     fvs <- findFVs body
+                --     let node = (bind, (varID . baseVar) v, map varID (S.toList fvs))
+                --     (node:) <$> buildOrderGraph bs
                 buildOrderGraph (bind@(LazyBinding _ v (Lf caps _ _)):bs) = do
                     let node = (bind, (varID . baseVar) v, map varID caps)
                     (node:) <$> buildOrderGraph bs
@@ -450,15 +686,18 @@ convertAST expr poset =
                 nameForPattern _ = Nothing
 
         convert (T.Case _ mul disc branches) = do
-            local (eager .~ isEager mul) $ do
-                cvtDisc <- convert disc
-                cvtBranches <- mapM cvtBranch branches
-                pure (Case cvtDisc cvtBranches)
+            -- The discriminator is only GU if the expression is GU and the discriminator
+            -- is relevant
+            cvtDisc <- local (guaranteed %~ (&& isRelevant mul)) (convert disc)
+            -- Branches are GU if the expression is GU
+            cvtBranches <- mapM cvtBranch branches
+            pure (Case cvtDisc cvtBranches)
             where
                 cvtBranch :: T.TypedCaseBranch -> Translator Alternative
                 cvtBranch (T.TypedCaseBranch pat branch) = do
                     (p, ids) <- convertPattern pat
-                    cvtBranch <- local (idMap %~ M.union ids) $ convert branch
+                    let ids' = M.map (\v -> (baseVar v, baseVar v)) ids
+                    cvtBranch <- local (idMap %~ M.union ids') $ convert branch
                     pure (Alt p cvtBranch)
 
         convert (T.Application _ fun arg) = do
@@ -473,41 +712,40 @@ convertAST expr poset =
                     | M.member name B.functions = liftArgs args (PrimApp name)
                     | M.member name Builtin.Builtin.constructors = liftArgs args (ConsApp name)
                     | otherwise = do
-                        funVar <- asks ((M.! name) . (^. idMap))
-                        liftArgs args (Application funVar)
+                        funVar <- lookupVar name
+                        case funVar of
+                          Just v -> liftArgs args (Application v)
+                          Nothing -> pure Error
                 collectArgs expr args = do
+                    -- Innermost function is GU if the application is GU
                     funExpr <- convert expr
                     case funExpr of
                       Let binds (Application funVar []) -> do
                           liftArgs args (Let binds . Application funVar)
                       _ -> do
-                          let funTy = IR.datatype (typeof expr)
+                          let funTy = ttype (typeof expr)
                           funVar <- freshName
-                          liftArgs args (Let [EagerBinding Nothing (TV funVar funTy) funExpr] . Application funVar)
+                          let alt = Alt (VarPattern funVar) . Application funVar
+                              caseExpr = Case funExpr . NE.singleton . alt
+                          liftArgs args caseExpr
 
                 liftArgs :: [(Multiplicity, T.TypedExpr)] -> ([Atom] -> CodegenExpr) -> Translator CodegenExpr
                 liftArgs args app = do
-                    boundArgs <- forM args $ \(mul, arg) -> do
-                        let argTy = IR.datatype (typeof arg)
-                        argName <- freshName
-                        (Var argName,) <$>
-                            if isEager mul
-                               then EagerBinding Nothing (TV argName argTy) <$>
-                                        local (eager .~ True) (convert arg)
-                               else LazyBinding Nothing (TV argName argTy) <$>
-                                        local (eager .~ False) (convertLambdas arg)
-                    let (argVars, binds) = unzip boundArgs
-                    pure (Let binds (app argVars))
+                    (argVars, binds, projectors) <- unzip3 <$> mapM liftFuncArg args
+                    let combinedProjector = foldr (.) id projectors
+                    pure (Let (catMaybes binds) (combinedProjector (app argVars)))
 
         convert lam@(T.Lambda t _ _ _) = do
-            let lambdaTy = IR.datatype t
+            let lambdaTy = ttype t
             lambdaName <- freshName
             bind <- LazyBinding Nothing (TV lambdaName lambdaTy) <$> convertLambdas lam
             pure (Let [bind] (Application lambdaName []))
 
         convert (T.Variable _ name) = do
-            vName <- asks ((M.! name) . (^. idMap))
-            pure (Application vName [])
+            v <- lookupVar name
+            case v of
+              Just vName -> pure (Application vName [])
+              Nothing -> pure Error
 
         convert (T.Literal _ lit) = convertLit lit
             where
@@ -524,26 +762,19 @@ convertAST expr poset =
                     --         es' <- makeList es
                     --         pure (ConsApp (P.I "::") [e', es'])
                 convertLit (P.TupleLiteral ts) = do
-                    eagerTuple <- asks (^. eager)
-                    bindings <- forM ts $ \expr -> do
-                        nm <- TV <$> freshName <*> pure (IR.datatype (typeof expr))
-                        if isLambda expr || not eagerTuple
-                           then do
-                               (nm,) . LazyBinding Nothing nm <$> convertLambdas expr
-                           else do
-                               (nm,) . EagerBinding Nothing nm <$> convert expr
-                    let (vars, binds) = unzip bindings
-                        tuple = PackedTuple (IR.Structure (map varType vars)) (map (Var . baseVar) vars)
-                    pure (Let binds tuple)
+                    gu <- asks (^. guaranteed)
+                    (argVars, binds, projectors) <- unzip3 <$> mapM (liftFuncArg . (MAtom P.Linear,)) ts
+                    let combinedProjector = foldr (.) id projectors
+                    pure (Let (catMaybes binds) (combinedProjector (PackedTuple argVars)))
 
-        convertPattern :: T.Pattern -> Translator (Pattern, IdMap)
+        convertPattern :: T.Pattern -> Translator (Pattern, M.HashMap P.Identifier TypedVar)
         convertPattern (T.VariablePattern t name) = do
             v <- freshName
-            pure (VarPattern v, M.singleton name v)
+            pure (VarPattern v, M.singleton name (TV v (ttype t)))
         convertPattern (T.ConstructorPattern name ps) = undefined
         convertPattern (T.LiteralPattern lit) = convertLitPattern lit
             where
-                convertLitPattern :: P.Literal T.Pattern -> Translator (Pattern, IdMap)
+                convertLitPattern :: P.Literal T.Pattern -> Translator (Pattern, M.HashMap P.Identifier TypedVar)
                 convertLitPattern (P.IntLiteral i) = pure (LitPattern (IntLiteral i), M.empty)
                 convertLitPattern (P.RealLiteral r) = pure (LitPattern (RealLiteral r), M.empty)
                 convertLitPattern (P.ListLiteral ls) = undefined
@@ -554,40 +785,74 @@ convertAST expr poset =
         convertLambdas :: T.TypedExpr -> Translator LambdaForm
         convertLambdas lam@(T.Lambda (T.FunctionType from _ _) mul _ _) = do
             varName <- freshName -- (getTypeFor mul from)
+            gu <- asks (^. guaranteed)
             (vs, expr) <- case lam of
                             T.Lambda _ _ (T.VariablePattern _ name) body -> do
-                                local (idMap %~ M.insert name varName) $ collectLambdas' 1 [] body
+                                local (idMap %~ M.insert name (varName, varName)) $ collectLambdas' 1 [] body
                             T.Lambda _ mul pattern body -> collectLambdas' 1 [(varName, pattern, mul)] body
             fvs <- local (bound %~ S.union (S.fromList (varName:map (baseVar . snd) vs))) $ findFVs expr
-            pure (Lf (S.toList fvs) ((isEager mul, TV varName (IR.datatype from)):vs) expr)
+            pure (Lf (S.toList fvs) ((gu && isRelevant mul, TV varName (ttype from)):vs) expr)
             where
                 collectLambdas' :: Int -> [(Var, T.Pattern, Multiplicity)] -> T.TypedExpr
                                 -> Translator ([(Bool, TypedVar)], CodegenExpr)
                 collectLambdas' depth toMatch (T.Lambda (T.FunctionType from _ _) mul (T.VariablePattern _ name) body) = do
+                    gu <- asks (^. guaranteed)
                     varName <- freshName -- (getTypeFor mul from)
-                    (vs, expr) <- local (idMap %~ M.insert name varName) $ collectLambdas' (depth + 1) toMatch body
-                    pure ((isEager mul, TV varName (IR.datatype from)):vs, expr)
+                    (vs, expr) <- local (idMap %~ M.insert name (varName, varName)) $ collectLambdas' (depth + 1) toMatch body
+                    pure ((gu && isRelevant mul, TV varName (ttype from)):vs, expr)
                 collectLambdas' depth toMatch (T.Lambda (T.FunctionType from _ _) mul pattern body) = do
+                    gu <- asks (^. guaranteed)
                     varName <- freshName -- (getTypeFor mul from)
                     (vs, expr) <- collectLambdas' (depth + 1) ((varName, pattern, mul):toMatch) body
-                    pure ((isEager mul, TV varName (IR.datatype from)):vs, expr)
+                    pure ((gu && isRelevant mul, TV varName (ttype from)):vs, expr)
                 collectLambdas' depth toMatch expr = do
                     base <- buildCases (reverse toMatch)
                     pure ([], base)
                     where
                         buildCases :: [(Var, T.Pattern, Multiplicity)] -> Translator CodegenExpr
-                        buildCases [] = local (eager .~ False) $ convert expr
+                        buildCases [] = convert expr
                         buildCases ((v, pat, mul):rest) = do
                             (p, ids) <- convertPattern pat
-                            local (idMap .~ ids) $ do
+                            local (idMap %~ M.union (M.map (\v -> (baseVar v, baseVar v)) ids)) $ do
                                 baseExpr <- (if isAffine mul then Free v else id) <$> buildCases rest
                                 pure (Case (Application v []) (NE.singleton (Alt p baseExpr)))
 
         convertLambdas expr = do
-            expr' <- local (eager .~ False) $ convert expr
+            expr' <- convert expr
             fvs <- findFVs expr'
             pure (Lf (S.toList fvs) [] expr')
 
+        lookupVar :: P.Identifier -> Translator (Maybe Var)
+        lookupVar name = do
+            gu <- asks (^. guaranteed)
+            asks (((if gu then fst else snd) <$>) . M.lookup name . (^. idMap))
+
+        liftFuncArg :: (Multiplicity, T.TypedExpr)
+                -> Translator (Atom, Maybe Binding, CodegenExpr -> CodegenExpr)
+        liftFuncArg (mul, T.Variable t name) = do
+            gu <- asks (^. guaranteed)
+            argVar <- fromJust <$> lookupVar name
+            if gu && isRelevant mul
+               then do
+                   matchVar <- freshName
+                   let alt = Alt (VarPattern matchVar)
+                       matcher = Case (Application argVar []) . NE.singleton . alt
+                   pure (Var matchVar, Nothing, matcher)
+               else pure (Var argVar, Nothing, id)
+        liftFuncArg (mul, arg) = do
+            gu <- asks (^. guaranteed)
+            if gu && isRelevant mul
+               then do
+                   cvtArg <- convert arg
+                   matchVar <- freshName
+                   let alt = Alt (VarPattern matchVar)
+                       matcher = Case cvtArg . NE.singleton . alt
+                   pure (Var matchVar, Nothing, matcher)
+               else do
+                   cvtArg <- local (guaranteed .~ False) $ convertLambdas arg
+                   bindVar <- freshName
+                   let binding = LazyBinding Nothing (TV bindVar (ttype (typeof arg))) cvtArg
+                   pure (Var bindVar, Just binding, id)
         -- cvtAST :: T.TypedExpr -> Translator CodegenExpr
         -- cvtAST (T.Let _ bindings body) = do
         --     newVars <- getAllVars
@@ -826,8 +1091,13 @@ convertAST expr poset =
         --             ps <- mapM convertPattern ts
         --             pure (LiteralPattern (IR.Structure (map patternDataType ps)) (P.TupleLiteral ps))
 
-        isEager :: Multiplicity -> Bool
-        isEager mul = P.leq mul (T.MAtom P.Relevant) poset
+        isRelevant :: Multiplicity -> Bool
+        isRelevant mul = P.leq mul (T.MAtom P.Relevant) poset
+
+        -- eval :: Multiplicity -> Evaluation
+        -- eval mul = if isEager mul
+        --               then Strict
+        --               else Lazy
 
         isAffine :: Multiplicity -> Bool
         isAffine mul = P.leq mul (T.MAtom P.Affine) poset

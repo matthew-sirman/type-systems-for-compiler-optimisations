@@ -56,7 +56,9 @@ transformAST stmts ctx =
 
         embellishFunction :: Loc Identifier -> Loc TypeExpr -> Loc ValExpr -> Preprocessor LetBinding
         embellishFunction name tExpr vExpr = do
-            let mul = Just (L (location name) (MEAtom Normal))
+            let mul 
+                    | syntax name == I "main" = Just (L (location name) (MEAtom Linear))
+                    | otherwise = Just (L (location name) (MEAtom Normal))
                 bindName = L (location name) (Annotated (fmap VarPattern name) (Just tExpr))
             body <- embellishLambdas tExpr vExpr
             pure (LetBinding mul bindName body)

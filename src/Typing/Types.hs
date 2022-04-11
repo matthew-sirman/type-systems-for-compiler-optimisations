@@ -74,6 +74,7 @@ import Error.Error (showContext)
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import qualified Data.DisjointSet as DS
+import qualified Data.DisjointMap as DM
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 
@@ -156,6 +157,11 @@ instance P.FixedCorePoset MultiplicityAtom Multiplicity where
     unconj (MProd l r) = Just (l, r)
     unconj _ = Nothing
 
+data MultiplicityOperation
+    = Done Multiplicity
+    | LUB Multiplicity
+    | GLB Multiplicity
+
 newtype Arrow = Arrow Multiplicity
     deriving (Eq, Ord)
 
@@ -232,6 +238,7 @@ data CheckState = CheckState
     , _typeEquivalences     :: DS.DisjointSet Type
 
     , _freshMulVars         :: Stream.Stream MultiplicityVar
+    -- , _mulEquivalences      :: DM.DisjointMap MultiplicityVar Multiplicity
     , _mulEquivalences      :: DS.DisjointSet Multiplicity
     , _mulRelation          :: MultiplicityPoset
 

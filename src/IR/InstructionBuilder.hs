@@ -68,6 +68,7 @@ getElementPtr getReg src path = do
         findType dt [] = dt
         findType (Structure dts) (p:ps) = findType (dts !! p) ps
         findType (NamedStruct (Struct _ dts _)) (p:ps) = findType (dts !! p) ps
+        findType t path = error $ show (dataType src) ++ ", " ++ show t ++ ", " ++ show path 
 
 bitcast :: MonadIRBuilder r m => m r -> Value r -> DataType -> m (Value r)
 bitcast getReg val dt = do

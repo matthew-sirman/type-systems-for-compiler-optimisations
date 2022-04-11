@@ -34,7 +34,7 @@ import Prelude hiding (read)
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
-import Data.Sequence as Seq hiding (zip, zipWith, unzip)
+import Data.Sequence as Seq hiding (zip, zipWith, unzip, filter)
 import Data.Bifunctor (bimap)
 import Data.Maybe (catMaybes, fromMaybe, fromJust)
 import Data.Word
@@ -61,13 +61,6 @@ type Function = IR.Function Variable
 type Program = IR.Program Variable
 
 type NameMap = M.HashMap Integer Value
-
-data Evaluation
-    = Strict
-    | Lazy
-    deriving (Eq, Generic)
-
-instance Hashable Evaluation
 
 data Variable
     = Variable Evaluation Integer
@@ -109,6 +102,31 @@ newtype Compiler a = Compiler { runCompiler :: ReaderT CompilerInfo (State Compi
 
 instance MonadIRBuilder Variable Compiler where
     addInstruction i = modify (blockStack . ix 0 . IR.iList %~ (:|> i))
+    
+voidPtr :: IR.DataType
+voidPtr = IR.Pointer (IR.FirstOrder IR.Void)
+
+thunkFunc :: [IR.DataType] -> IR.DataType
+thunkFunc args = IR.FunctionT (IR.FirstOrder IR.Void) (thunkArg : args)
+    where
+        thunkArg :: IR.DataType
+        thunkArg = IR.Pointer (IR.Structure [IR.NamedStruct B.thunkTagStruct, voidPtr])
+
+ttypeToIRData :: Evaluation -> TranslateType -> IR.DataType
+ttypeToIRData eval IntT = wrapIRData eval (IR.FirstOrder IR.Int64T)
+ttypeToIRData eval RealT = wrapIRData eval (IR.FirstOrder IR.Real64T)
+ttypeToIRData eval Poly = wrapIRData eval voidPtr
+ttypeToIRData eval (Tuple ts) = wrapIRData eval (IR.Pointer (IR.Structure (map (ttypeToIRData eval) ts)))
+ttypeToIRData eval (Named name) = undefined
+ttypeToIRData eval (Function ret args) =
+    IR.FunctionT (unwrapIRData eval (ttypeToIRData eval ret)) (map (ttypeToIRData Lazy) args)
+
+wrapIRData :: Evaluation -> IR.DataType -> IR.DataType
+wrapIRData Strict dt = dt
+wrapIRData Lazy dt = IR.Pointer (IR.Structure [IR.NamedStruct B.thunkTagStruct, dt])
+
+unwrapIRData Strict dt = dt
+unwrapIRData Lazy (IR.Pointer (IR.Structure [_, dt])) = dt
 
 compile :: T.TypedExpr -> T.MultiplicityPoset -> Program
 compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) startState ^. compiledProgram
@@ -137,10 +155,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                                         : thunkFunc []
                                         : captureTypes
                                         )
-                        forcedType = IR.Pointer (IR.Structure
-                                                    [ IR.NamedStruct B.thunkTagStruct
-                                                    , varType var
-                                                    ])
+                        forcedType = ttypeToIRData Lazy (varType var)
 
                     thunkReg <- mkVar Strict
 
@@ -199,7 +214,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     (argRegs, argVarMap) <- mapAndUnzipM makeArgument args
                     let varMap = M.fromList argVarMap
                     func <- pushFunction name argRegs
-                    let funcVal = IR.ValFunction (varType var) func
+                    let funcVal = IR.ValFunction (ttypeToIRData Lazy (varType var)) func
                     pushBlock
                     result <- local ( (nameMap %~ M.union varMap)
                                     . (nameMap %~ M.insert (varID (baseVar var)) funcVal)
@@ -210,9 +225,9 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     pure (varID (baseVar var), funcVal)
 
                 genBinding (LazyBinding name var (Lf captures args body)) = do
-                    let funcType = thunkFunc (map (varType . snd) args)
+                    let funcType = thunkFunc (map (ttypeToIRData Lazy . varType . snd) args)
                     currentBoundVars <- asks (^. nameMap)
-                    let capVals = map ((currentBoundVars M.!) . varID) captures
+                    let capVals = map ((currentBoundVars M.!) . varID) (filter (/= baseVar var) captures)
                         captureTypes = map IR.dataType capVals
                         closureType = IR.Structure
                                           ( funcType
@@ -256,10 +271,10 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                     popFunction
                     pure (varID (baseVar var), clVar)
 
-                genBinding (EagerBinding _ var body) = do
-                    res <- local (recursiveStrict %~ S.insert (baseVar var)) $ codegen body
-                    pure (varID (baseVar var), res)
-                    -- fst <$> unpackPattern (throw 1) pat res
+                -- genBinding (EagerBinding _ var body) = do
+                --     res <- local (recursiveStrict %~ S.insert (baseVar var)) $ codegen body
+                --     pure (varID (baseVar var), res)
+                --     -- fst <$> unpackPattern (throw 1) pat res
 
                 writeCapture :: Value -> Var -> Int -> Compiler ()
                 writeCapture base v offset = do
@@ -276,10 +291,11 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
 
                 makeArgument :: (Bool, TypedVar) -> Compiler (Variable, (Integer, Value))
                 makeArgument (eager, v) = do
-                    arg <- if eager
-                              then mkArg Strict
-                              else mkArg Lazy
-                    pure (arg, (varID (baseVar v), IR.ValVariable (varType v) arg))
+                    let eval = if eager
+                                  then Strict
+                                  else Lazy
+                    arg <- mkArg eval
+                    pure (arg, (varID (baseVar v), IR.ValVariable (ttypeToIRData eval (varType v)) arg))
 
         codegen (Case disc branches) = do
             discVal <- codegen disc
@@ -329,11 +345,19 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                 genLiteral (IntLiteral i) = pure (mkInt i)
                 genLiteral (RealLiteral r) = pure (IR.ValImmediate (IR.Real64 r))
 
-        codegen (PackedTuple tupleType vs) = do
-            tuplePtr <- malloc (mkVar Strict) tupleType
+        codegen (PackedTuple vs) = do
+            elemTypes <- mapM argType vs
+            tuplePtr <- malloc (mkVar Strict) (IR.Structure elemTypes)
             zipWithM_ (writeVal tuplePtr) vs [0..]
             pure tuplePtr
             where
+                argType :: Atom -> Compiler IR.DataType
+                argType (Var v) = do
+                    currentBoundVars <- asks (^. nameMap)
+                    pure (IR.dataType (currentBoundVars M.! varID v))
+                argType (Lit (IntLiteral _)) = pure (IR.FirstOrder IR.Int64T)
+                argType (Lit (RealLiteral _)) = pure (IR.FirstOrder IR.Real64T)
+
                 getValue :: Atom -> Compiler Value
                 getValue (Var v) = lookupVar v
                 getValue (Lit l) = codegen (Literal l)
@@ -354,6 +378,10 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
             freeVar <- lookupVar var
             addInstruction $ IR.Free freeVar
             codegen expr
+
+        codegen Error = do
+            throw 1
+            pure (IR.ValImmediate IR.Undef)
 
         lookupVar :: Var -> Compiler Value
         lookupVar v = do
@@ -438,7 +466,7 @@ compile expr poset = execState (runReaderT (runCompiler finalise) startInfo) sta
                 unpack :: Pattern -> Value -> Compiler (NameMap, Bool)
                 unpack (VarPattern name) var =
                     pure (M.singleton (varID name) var, False)
-                unpack (ConsPattern _ cons args) var = undefined
+                unpack (ConsPattern cons args) var = undefined
                 unpack (TuplePattern ts) var = do
                     (nameMaps, refutable) <- unzip <$> zipWithM unpackElem ts [0..]
                     pure (M.unions nameMaps, or refutable)
