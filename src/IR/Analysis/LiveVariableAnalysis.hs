@@ -51,6 +51,7 @@ ref (IR.Jump {}) = S.empty
 ref (IR.Phi _ nodes) = S.unions (map (\(IR.PhiNode (val, _)) -> valRef val) nodes)
 ref (IR.Return Nothing) = S.empty
 ref (IR.Return (Just val)) = valRef val
+ref (IR.PrintF _ args) = S.unions (map valRef args)
 ref (IR.Throw {}) = S.empty
 
 valRef :: Hashable r => IR.Value r -> S.HashSet r
@@ -72,6 +73,7 @@ def (IR.Branch {}) = S.empty
 def (IR.Jump {}) = S.empty
 def (IR.Phi res _) = S.singleton res
 def (IR.Return {}) = S.empty
+def (IR.PrintF {}) = S.empty
 def (IR.Throw {}) = S.empty
 
 findBBLiveVars :: forall r. (Eq r, Hashable r) => S.HashSet r -> IR.BasicBlock r

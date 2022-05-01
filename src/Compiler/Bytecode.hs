@@ -17,6 +17,7 @@ import Data.Sequence as Seq hiding (zip, replicate, reverse, length)
 import Data.Array
 import Data.Word
 import Data.Foldable (toList)
+import Data.List (intercalate)
 
 import Control.Lens
 import Control.Monad.State
@@ -61,7 +62,8 @@ data BytecodeInstruction hole
     | Call (BytecodeValue hole)
     | Return
     | Push (BytecodeValue hole)
-    | Pop Register
+    | Pop (Maybe Register)
+    | PrintF String [BytecodeValue hole]
     | Throw Int
     | CodeLabel hole
 
@@ -77,7 +79,10 @@ instance Show hole => Show (BytecodeInstruction hole) where
     show (Call addr) = "call " ++ show addr
     show Return = "ret"
     show (Push val) = "push " ++ show val
-    show (Pop reg) = "pop " ++ show reg
+    show (Pop Nothing) = "pop"
+    show (Pop (Just reg)) = "pop " ++ show reg
+    show (PrintF fmt []) = "printf(" ++ show fmt ++ ")"
+    show (PrintF fmt args) = "printf(" ++ show fmt ++ ", " ++ intercalate ", " (map show args) ++ ")"
     show (Throw err) = "throw " ++ show err
     show (CodeLabel label) = show label ++ ":"
 
@@ -94,6 +99,7 @@ instance Functor BytecodeInstruction where
     fmap _ Return = Return
     fmap f (Push val) = Push (fmap f val)
     fmap _ (Pop reg) = Pop reg
+    fmap f (PrintF fmt args) = PrintF fmt (fmap f <$> args)
     fmap _ (Throw err) = Throw err
     fmap f (CodeLabel label) = CodeLabel (f label)
 
@@ -187,16 +193,16 @@ generateBytecode compState =
 
             pushI (pure (CodeLabel (Fun (fn ^. IR.funcId))))
 
-            let argVars = map (Reg . (registerAllocation M.!)) (fn ^. IR.args)
+            let argVars = map ((Reg <$>) . (`M.lookup` registerAllocation) . fst) (fn ^. IR.args)
 
             forM_ (reverse argVars) $ \arg ->
                 pushI (pure (Pop arg))
 
             forM_ (fn ^. IR.blocks) $ \blk -> do
                 let nodeID = nodeIDMap M.! (blk ^. IR.label)
-                    lvaBB = ((liveVars ^. IR.nodes) M.! nodeID) ^. IR.node
+                    lvaBB = (^. IR.node) <$> M.lookup nodeID (liveVars ^. IR.nodes)
                 case lvaBB of
-                  IR.BlockNode lvaBlock -> remapBlock registerAllocation lvaBlock blk
+                  Just (IR.BlockNode lvaBlock) -> remapBlock registerAllocation lvaBlock blk
                   _ -> pure ()
 
         remapBlock :: M.HashMap Variable Word64 -> IR.LVABasicBlock Variable -> C.BasicBlock -> Generator ()
@@ -245,7 +251,7 @@ generateBytecode compState =
                     where
                         offset :: Generator (BytecodeValue TargetHole)
                         offset = do
-                            let IR.Pointer dt = IR.dataType addr
+                            let IR.Pointer dt = IR.datatype addr
                                 (byteOffset, bitOffset) = IR.elementPtrOffset dt path
                             when (bitOffset /= 0) $ do
                                 let extractBit readReg = do
@@ -277,7 +283,7 @@ generateBytecode compState =
                         pushVar v = pushI (Push . Register <$> remapVar v)
 
                         popVar :: Variable -> Generator ()
-                        popVar v = pushI (Pop <$> remapVar v)
+                        popVar v = pushI (Just (Pop (remapVar v)))
                 emit _ (IR.Branch val label) =
                     pushI (Branch <$> remapV val <*> pure (Block label))
                 emit _ (IR.Jump label) =
@@ -287,6 +293,8 @@ generateBytecode compState =
                 emit _ (IR.Return (Just val)) = do
                     pushI (Move ReturnReg <$> remapV val)
                     pushI (pure Return)
+                emit _ (IR.PrintF fmt args) = do
+                    pushI (PrintF fmt <$> mapM remapV args)
                 emit _ (IR.Throw err) = pushI (pure (Throw err))
 
                 remapV :: C.Value -> Maybe (BytecodeValue TargetHole)

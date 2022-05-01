@@ -64,8 +64,9 @@ tokens :-
     ";"                                 { symbol TokSemiColon }
     "\"                                 { symbol TokBackslash }
 
-    [a-z \_] [$alpha $digit \_ \']*     { identifier TokLowerId }
-    [A-Z] [$alpha $digit \_ \']*        { identifier TokUpperId }
+    [= \! \< \> \+ \- \* \/ \$]+\#?     { identifier TokInfixId }
+    [a-z \_] [$alpha $digit \_ \']*\#?  { identifier TokLowerId }
+    [A-Z] [$alpha $digit \_ \']*\#?     { identifier TokUpperId }
     "@" [a-z \_] [$alpha $digit \_ \']* { identifier TokMultiplicityId }
     $digit+                             { numeric TokIntegerLit }
     $digit+\.$digit+                    { numeric TokRealLit }
@@ -117,6 +118,7 @@ data Token
     | TokSemiColon                  -- ;
     | TokBackslash                  -- \
 
+    | TokInfixId Identifier         -- [=!<>+-*/$]+
     | TokLowerId Identifier         -- [a-z_][a-zA-Z_'']*
     | TokUpperId Identifier         -- [A-Z][a-zA-Z_'']*
     | TokMultiplicityId Identifier  -- @[a-z_][a-zA-Z_'']*

@@ -13,6 +13,8 @@ import Builtin.Builtin
 import System.Environment
 import Control.Monad.Except
 
+import Debug.Trace
+
 data Options = Options
     { sourceFile :: FilePath
     , interpreterSettings :: InterpreterSettings
@@ -23,6 +25,7 @@ type Process a = ExceptT String IO a
 settings :: InterpreterSettings
 settings = defaultSettings
     { _debug = True
+    , _showExecInstruction = False
     , _showBytecode = False
     }
 
@@ -50,16 +53,15 @@ preprocess source = do
       Left e -> throwError (showPPError source e)
       Right expr -> pure expr
 
-runTypeChecker :: String -> Process (TypedExpr, MultiplicityPoset)
-runTypeChecker source = do
-    (ve, ctx) <- preprocess source
+runTypeChecker :: String -> StaticContext -> Loc ValExpr -> Process (TypedExpr, MultiplicityPoset)
+runTypeChecker source ctx ve = do
     case typecheck ctx ve of
       Left (e, tvm) -> throwError (showError source tvm e)
       Right (t, ps) -> pure (t, ps)
 
-compileProgram :: TypedExpr -> MultiplicityPoset -> Process Program
-compileProgram expr ps =
-    pure (compile expr ps)
+compileProgram :: StaticContext -> MultiplicityPoset -> TypedExpr -> Process Program
+compileProgram staticContext ps expr = do
+    pure (traceShowId (compile staticContext ps expr))
 
 generate :: Program -> Process Bytecode
 generate program =
@@ -73,8 +75,9 @@ pipeline :: Process ()
 pipeline = do
     opt <- getOptions
     source <- readSourceFile opt
-    (expr, ps) <- runTypeChecker source
-    program <- compileProgram expr ps
+    (expr, ctx) <- preprocess source
+    (typedExpr, ps) <- runTypeChecker source ctx expr
+    program <- compileProgram ctx ps typedExpr
     bytecode <- generate program
     executeBytecode opt bytecode
 

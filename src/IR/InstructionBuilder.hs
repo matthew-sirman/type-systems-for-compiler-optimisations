@@ -4,12 +4,18 @@ module IR.InstructionBuilder where
 import IR.Instructions
 import IR.DataType
 
+import qualified Data.HashMap.Strict as M
+
+import Control.Monad.State
+
 import Debug.Trace
 
 -- TODO: Consider trying to remove calls to "error"
 
 class Monad m => MonadIRBuilder r m | m -> r where
     addInstruction :: Instruction r -> m ()
+
+class PrintFType a
 
 binop :: MonadIRBuilder r m => BinaryOperator -> m r -> Value r -> Value r -> m (Value r)
 binop op getReg lhs rhs = do
@@ -33,19 +39,20 @@ binop op getReg lhs rhs = do
 
 write :: MonadIRBuilder r m => Value r -> Value r -> m ()
 write val addr =
-    case dataType addr of
+    case datatype addr of
       Pointer addrTy ->
-        let valTy = dataType val
-            Pointer addrTy = dataType addr
-         in if valTy == addrTy
+        let valTy = datatype val
+            Pointer addrTy = datatype addr
+         in if compatible valTy addrTy
                then addInstruction $ Write val addr valTy
                else addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) (FirstOrder Void) -- error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
+               -- else error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
       _ -> addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) (FirstOrder Void) -- error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
 
 read :: MonadIRBuilder r m => m r -> Value r -> m (Value r)
 read getReg addr = do
     reg <- getReg
-    case dataType addr of
+    case datatype addr of
       Pointer dt -> do
           addInstruction $ Read reg addr dt
           pure (ValVariable dt reg)
@@ -56,7 +63,7 @@ read getReg addr = do
 getElementPtr :: MonadIRBuilder r m => m r -> Value r -> [Int] -> m (Value r)
 getElementPtr getReg src path = do
     reg <- getReg
-    case dataType src of
+    case datatype src of
       Pointer struct -> do
           addInstruction $ GetElementPtr reg src path
           pure (ValVariable (Pointer (findType struct path)) reg)
@@ -67,8 +74,9 @@ getElementPtr getReg src path = do
         findType :: DataType -> [Int] -> DataType
         findType dt [] = dt
         findType (Structure dts) (p:ps) = findType (dts !! p) ps
-        findType (NamedStruct (Struct _ dts _)) (p:ps) = findType (dts !! p) ps
-        findType t path = error $ show (dataType src) ++ ", " ++ show t ++ ", " ++ show path 
+        findType (NamedStruct (Struct _ names dts _) args) (p:ps) = findType (specialise (zip names args) (dts !! p)) ps
+        findType (NamedStruct (Alias _ names t) args) ps = findType (specialise (zip names args) t) ps
+        findType t path = error $ show (datatype src) ++ ", " ++ show t ++ ", " ++ show path 
 
 bitcast :: MonadIRBuilder r m => m r -> Value r -> DataType -> m (Value r)
 bitcast getReg val dt = do
@@ -82,12 +90,47 @@ malloc getReg dt = do
     addInstruction $ MAlloc reg (ValSizeOf dt)
     pure (ValVariable (Pointer dt) reg)
 
-call :: MonadIRBuilder r m => m r -> Value r -> [Value r] -> m (Value r)
+call :: Show r => MonadIRBuilder r m => m r -> Value r -> [Value r] -> m (Value r)
 call getReg fun args = do
     res <- getReg
-    addInstruction $ Call (Just res) fun args
-    let FunctionT retType _ = dataType fun
-    pure (ValVariable retType res)
+    let FunctionT retType argTypes = datatype fun
+    let (matches, subMap) = runState (matchArgs argTypes args) M.empty
+    if matches
+       then do
+           addInstruction $ Call (Just res) fun args
+           pure (ValVariable (specialise (M.toList subMap) retType) res)
+       else error $ "COMPILER ERROR: Invalid arguments in function call. " ++ show args ++ show argTypes
+    where
+        matchArgs :: [DataType] -> [Value r] -> State (M.HashMap TemplateArgName DataType) Bool
+        matchArgs [] [] = pure True
+        matchArgs (dt:dts) (v:vs) = matchArg dt (datatype v) .&&. matchArgs dts vs
+            where
+                matchArg :: DataType -> DataType -> State (M.HashMap TemplateArgName DataType) Bool
+                matchArg (FirstOrder fo) (FirstOrder fo') = pure (fo == fo')
+                matchArg (NamedStruct s args) (NamedStruct s' args') =
+                    foldl (.&&.) (pure (s == s')) (zipWith matchArg args args')
+                matchArg (Structure fields) (Structure fields') =
+                    foldl (.&&.) (pure True) (zipWith matchArg fields fields')
+                matchArg (FunctionT ret args) (FunctionT ret' args') =
+                    foldl (.&&.) (matchArg ret ret') (zipWith matchArg args args')
+                matchArg (Pointer (FirstOrder Void)) (Pointer _) = pure True
+                matchArg (Pointer t) (Pointer t') = matchArg t t'
+                matchArg (TemplateArg targ) t = do
+                    exists <- gets (M.lookup targ)
+                    case exists of
+                      Just t'
+                        | t /= t' -> pure False
+                      _ -> do
+                          modify (M.insert targ t)
+                          pure True
+                matchArg _ _ = pure False
+
+                (.&&.) :: Monad m => m Bool -> m Bool -> m Bool
+                (.&&.) ma mb = do
+                    a <- ma
+                    if a
+                       then mb
+                       else pure a
 
 voidCall :: MonadIRBuilder r m => Value r -> [Value r] -> m ()
 voidCall fun args = addInstruction $ Call Nothing fun args
@@ -109,18 +152,21 @@ phi getReg phiNodes = do
         (Just resType) = foldl findType Nothing phiNodes
 
         findType :: Maybe DataType -> PhiNode r -> Maybe DataType
-        findType Nothing (PhiNode (val, _)) = Just (dataType val)
+        findType Nothing (PhiNode (val, _)) = Just (datatype val)
         findType (Just dt) (PhiNode (val, _))
             | dt == FirstOrder Void = Just valTy
             | valTy == FirstOrder Void = Just dt
-            | dt == dataType val = Just dt
+            | dt == datatype val = Just dt
             | otherwise = error "COMPILER ERROR: Phi branches have different types."
             where
                 valTy :: DataType
-                valTy = dataType val
+                valTy = datatype val
 
 ret :: MonadIRBuilder r m => Maybe (Value r) -> m ()
 ret val = addInstruction $ Return val
+
+printf :: MonadIRBuilder r m => String -> [Value r] -> m ()
+printf fmt args = addInstruction $ PrintF fmt args
 
 throw :: MonadIRBuilder r m => Int -> m ()
 throw err = addInstruction $ Throw err

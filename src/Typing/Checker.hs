@@ -247,13 +247,13 @@ typecheck' ctx (L loc (VEVar x)) = Variable <$> contextLookup ctx loc x <*> pure
 typecheck' ctx (L _ (VELiteral lit)) = typecheckLiteral ctx lit
 
 typecheckLiteral :: Context -> Literal (Loc ValExpr) -> Checker TypedExpr
-typecheckLiteral _ (IntLiteral i) = pure (Literal B.intType (IntLiteral i))
+typecheckLiteral _ (IntLiteral i) = pure (Literal intType (IntLiteral i))
 
-typecheckLiteral _ (RealLiteral r) = pure (Literal B.realType (RealLiteral r))
+typecheckLiteral _ (RealLiteral r) = pure (Literal realType (RealLiteral r))
 
 typecheckLiteral ctx (ListLiteral es) = do
     initialListType <- freshPolyType
-    Literal (TypeApp B.listTypeCon initialListType) . ListLiteral <$> mapM (unifyElements initialListType) es
+    Literal (TypeApp listTypeCon initialListType) . ListLiteral <$> mapM (unifyElements initialListType) es
     where
         unifyElements :: Type -> Loc ValExpr -> Checker TypedExpr
         unifyElements t expr = do

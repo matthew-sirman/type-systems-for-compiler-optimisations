@@ -29,6 +29,8 @@ import qualified Data.HashSet as S
 import qualified Data.DisjointSet as DS
 import Data.Maybe (isJust, fromMaybe)
 
+import Debug.Trace
+
 extendGeneralise, extendNormal :: Context -> [(Multiplicity, Loc SourcePattern, Type)]
                                -> Checker (Context, [Pattern])
 extendGeneralise = extend True
@@ -53,7 +55,7 @@ extend generaliseTypes context (patTriple:patTriples) = do
             conss <- asks (^. dataConstructors)
             case M.lookup name conss of
               Nothing -> typeError $ ConstructorNotInScope loc name
-              Just scheme -> do
+              Just (scheme, _) -> do
                   consFunc <- instantiate scheme
                   (ConstructorPattern name <$>) <$> checkPatterns ctx consFunc patterns
             where
@@ -72,14 +74,14 @@ extend generaliseTypes context (patTriple:patTriples) = do
 
         extendLiteral :: Context -> Multiplicity -> SourceLocation -> Literal (Loc SourcePattern) -> Type -> Checker (Context, Literal Pattern)
         extendLiteral ctx _ loc (IntLiteral i) t = do
-            unify loc t B.intType
+            unify loc t intType
             pure (ctx, IntLiteral i)
         extendLiteral ctx _ loc (RealLiteral r) t = do
-            unify loc t B.realType
+            unify loc t realType
             pure (ctx, RealLiteral r)
         extendLiteral ctx mul loc (ListLiteral ts) t = do
             listType <- freshPolyType
-            unify loc t (TypeApp B.listTypeCon listType)
+            unify loc t (TypeApp listTypeCon listType)
             (ListLiteral <$>) <$> foldList listType ctx ts
             where
                 foldList :: Type -> Context -> [Loc SourcePattern] -> Checker (Context, [Pattern])
@@ -106,13 +108,25 @@ extend generaliseTypes context (patTriple:patTriples) = do
                 let freeTVars = S.difference (ftv tRep) (ftv ctx)
                     freeMVars = S.filter ((`P.unlimited` mulRel) . MPoly) $ S.difference (fuv tRep) (fuv ctx)
 
-                freshTVarMap <- M.fromList <$> mapM (\v -> (,) v <$> freshTVar) (S.toList freeTVars)
-                freshMVarMap <- M.fromList <$> mapM (\m -> (,) m <$> freshMVar) (S.toList freeMVars)
+                freshTVarMap <- M.fromList <$> mapM createTVarMapping (S.toList freeTVars)
+                freshMVarMap <- M.fromList <$> mapM createMVarMapping (S.toList freeMVars)
 
                 let newBase = substitute (M.map Poly freshTVarMap) (M.map MPoly freshMVarMap) tRep
 
                 pure (TypeScheme (S.fromList (M.elems freshTVarMap)) (S.fromList (M.elems freshMVarMap)) newBase, mul)
             | otherwise = pure (TypeScheme S.empty S.empty t, mul)
+            where
+                createTVarMapping :: TypeVar -> Checker (TypeVar, TypeVar)
+                createTVarMapping v = do
+                    v' <- freshTVar
+                    -- modify (typeEquivalences %~ DS.union (Poly v) (Poly v'))
+                    pure (v, v')
+
+                createMVarMapping :: MultiplicityVar -> Checker (TypeVar, MultiplicityVar)
+                createMVarMapping m = do
+                    m' <- freshTVar
+                    -- modify (mulEquivalences %~ DS.union (MPoly m) (MPoly m'))
+                    pure (m, m')
 
 checkRelevant :: Checker ()
 checkRelevant = do
@@ -181,7 +195,7 @@ contextLookup ctx loc name = do
               Just ts -> Just <$> instantiate ts
               Nothing ->
                   case M.lookup name conss of
-                    Just ts -> Just <$> instantiate ts
+                    Just (ts, _) -> Just <$> instantiate ts
                     Nothing -> pure Nothing
 
         checkAndConsume :: Multiplicity -> Checker ()
@@ -271,7 +285,7 @@ freshPolyMul = MPoly <$> freshMVar
 
 annotationToType :: Annotated a -> Checker Type
 annotationToType (Annotated _ Nothing) = freshPolyType
-annotationToType (Annotated _ (Just t)) = createTypeFor (syntax t)
+annotationToType (Annotated _ (Just t)) = createTypeFor t
 
 annotationToMultiplicity :: Maybe (Loc MultiplicityExpr) -> Checker Multiplicity
 annotationToMultiplicity Nothing = pure (MAtom Normal) -- freshPolyMul
@@ -288,9 +302,12 @@ createTermFor name = do
                   . (stackFrame . termNameContext %~ M.insert (syntax name) newTermVar))
            pure newTermVar
 
-createTypeFor :: TypeExpr -> Checker Type
-createTypeFor (TEGround name) = pure (Ground name)
-createTypeFor (TEPoly poly) = do
+createTypeFor :: Loc TypeExpr -> Checker Type
+createTypeFor (L loc (TEGround name)) = do
+    types <- asks (^. dataTypes)
+    unless (name `M.member` types) $ typeError $ MissingType loc name
+    pure (Ground name)
+createTypeFor (L _ (TEPoly poly)) = do
     typeNames <- gets (^. stackFrame . typeNameContext)
     case M.lookup poly typeNames of
       Just v -> pure v
@@ -300,20 +317,20 @@ createTypeFor (TEPoly poly) = do
           let polyType = Poly newTypeVar
           modify (stackFrame . typeNameContext %~ M.insert poly polyType)
           pure polyType
-createTypeFor (TEApp con arg) = do
-    conType <- createTypeFor (syntax con)
-    argType <- createTypeFor (syntax arg)
+createTypeFor (L _ (TEApp con arg)) = do
+    conType <- createTypeFor con
+    argType <- createTypeFor arg
     pure (TypeApp conType argType)
-createTypeFor (TEArrow from arrow to) = do
-    fromType <- createTypeFor (syntax from)
-    toType <- createTypeFor (syntax to)
+createTypeFor (L _ (TEArrow from arrow to)) = do
+    fromType <- createTypeFor from
+    toType <- createTypeFor to
     arrowType <- createArrowFor (syntax arrow)
     pure (FunctionType fromType arrowType toType)
-createTypeFor TEUnit = pure B.unitType
-createTypeFor (TETuple ts) = do
-    tupleTypes <- mapM (createTypeFor . syntax) ts
+createTypeFor (L _ TEUnit) = pure unitType
+createTypeFor (L _ (TETuple ts)) = do
+    tupleTypes <- mapM createTypeFor ts
     pure (TupleType tupleTypes)
-createTypeFor (TEList t) = TypeApp B.listTypeCon <$> createTypeFor (syntax t)
+createTypeFor (L _ (TEList t)) = TypeApp listTypeCon <$> createTypeFor t
 
 createArrowFor :: ArrowExpr -> Checker Arrow
 createArrowFor (ArrowExpr Nothing) = typeError $ GenericError Nothing "SHOULD NEVER HAPPEN! Unannotated arrow."
@@ -419,7 +436,7 @@ findMulRep m = do
 checkTypeEntails :: Context -> Type -> Maybe (Loc TypeExpr) -> Checker ()
 checkTypeEntails _ _ Nothing = pure ()
 checkTypeEntails ctx inferredType (Just ann) = do
-    itr <- findTypeRep inferredType
+    itr <- findTypeRep (traceShowId inferredType)
     evalStateT (entails itr ann) M.empty
     where
         ctxFtvs :: S.HashSet TypeVar
@@ -428,7 +445,7 @@ checkTypeEntails ctx inferredType (Just ann) = do
         entails :: Type -> Loc TypeExpr
                 -> StateT (M.HashMap TypeVar Type) (ExceptT (TypeError, TypeVarMap) CheckerState) ()
         entails t@(Poly p) expr = do
-            exprType <- lift $ createTypeFor (syntax expr)
+            exprType <- lift $ createTypeFor expr
             subType <- gets (M.lookup p)
             case subType of
               Just t
@@ -439,11 +456,14 @@ checkTypeEntails ctx inferredType (Just ann) = do
         entails t@(Ground name) (L loc (TEGround name'))
             | name == name' = pure ()
             | otherwise = lift $ typeError $ EntailmentFailure loc t
+        entails t@(Ground name) (L loc TEUnit)
+            | t == unitType = pure ()
+            | otherwise = lift $ typeError $ EntailmentFailure loc t
         entails (TypeApp con arg) (L _ (TEApp con' arg')) = do
             entails con con'
             entails arg arg'
         entails t@(TypeApp listCon listArg) (L loc (TEList list))
-            | listCon == B.listTypeCon = entails listArg list
+            | listCon == listTypeCon = entails listArg list
             | otherwise = lift $ typeError $ EntailmentFailure loc t
         entails t@(FunctionType from (Arrow mul) to) (L loc (TEArrow from' (L _ (ArrowExpr (Just mul'))) to')) = do
             entails from from'

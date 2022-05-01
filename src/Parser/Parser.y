@@ -30,7 +30,7 @@ import Data.Maybe (fromJust)
 %error { parseError }
 %monad { Alex }
 %lexer { lexer } { L _ TokEOF }
-%expect 21
+%expect 22
 
 %token
     let                 { L _ KWlet }
@@ -75,6 +75,7 @@ import Data.Maybe (fromJust)
     ';'                 { L _ TokSemiColon }
     '\\'                { L _ TokBackslash }
 
+    ivar                { L _ (TokInfixId _) }
     lvar                { L _ (TokLowerId _) }
     uvar                { L _ (TokUpperId _) }
     mvar                { L _ (TokMultiplicityId _) }
@@ -100,7 +101,9 @@ stmts :: { [Loc Statement] }
 
 stmt :: { Loc Statement }
     : lvar ':' type ';;'                                { loc (TypeDecl (idTok $1) $3) $1 $> }
+    | '(' infix_op ')' ':' type ';;'                    { loc (TypeDecl $2 $5) $1 $> }
     | lvar seq(pattern) '=' expr ';;'                   { loc (makeFuncDecl (idTok $1) $2 $4) $1 $> }
+    | pattern infix_op pattern '=' expr ';;'            { loc (makeFuncDecl $2 [$1, $3] $5) $1 $> }
     | datatype ';;'                                     { loc (TypeDef $1) $1 $> }
 
 expr :: { Loc ValExpr }
@@ -111,7 +114,7 @@ expr :: { Loc ValExpr }
     | term                                              { $1 }
 
 term :: { Loc ValExpr }
-    : term binop term                                   { loc (makeBinOp $1 $2 $3) $1 $> }
+    : term infix_op term                                { loc (makeBinOp $1 (VEVar <\$> $2) $3) $1 $> }
     | apps                                              { $1 }
 
 apps :: { Loc ValExpr }
@@ -124,21 +127,23 @@ atom :: { Loc ValExpr }
     | uvar                                              { loc (VEVar (rawId $1)) $1 $> }
     | int                                               { loc (VELiteral (IntLiteral (intTok $1))) $1 $> }
     | real                                              { loc (VELiteral (RealLiteral (realTok $1))) $1 $> }
+    | '(' ')'                                           { loc (VEVar (I "()")) $1 $> }
     | tuple(expr)                                       { (VELiteral . TupleLiteral) <\$> $1 }
     | list(expr)                                        { (VELiteral . ListLiteral) <\$> $1 }
 
-binop :: { Loc ValExpr }
-    : '=='                                              { loc (VEVar (I "==")) $1 $> }
-    | '!='                                              { loc (VEVar (I "!=")) $1 $> }
-    | '<'                                               { loc (VEVar (I "<")) $1 $> }
-    | '>'                                               { loc (VEVar (I ">")) $1 $> }
-    | '<='                                              { loc (VEVar (I "<=")) $1 $> }
-    | '>='                                              { loc (VEVar (I ">=")) $1 $> }
-    | '+'                                               { loc (VEVar (I "+")) $1 $> }
-    | '-'                                               { loc (VEVar (I "-")) $1 $> }
-    | '*'                                               { loc (VEVar (I "*")) $1 $> }
-    | '/'                                               { loc (VEVar (I "/")) $1 $> }
-    | '::'                                              { loc (VEVar (I "::")) $1 $> }
+infix_op :: { Loc Identifier }
+    : '=='                                              { loc (I "==") $1 $> }
+    | '!='                                              { loc (I "!=") $1 $> }
+    | '<'                                               { loc (I "<") $1 $> }
+    | '>'                                               { loc (I ">") $1 $> }
+    | '<='                                              { loc (I "<=") $1 $> }
+    | '>='                                              { loc (I ">=") $1 $> }
+    | '+'                                               { loc (I "+") $1 $> }
+    | '-'                                               { loc (I "-") $1 $> }
+    | '*'                                               { loc (I "*") $1 $> }
+    | '/'                                               { loc (I "/") $1 $> }
+    | '::'                                              { loc (I "::") $1 $> }
+    | ivar                                              { loc (rawId $1) $1 $> }
 
 datatype :: { Loc TypeDefinition }
     : data uvar seq(lvar) seq(mvar)                     { makeTypeDef $1 (idTok $2) (idTok <\$> $3) (idTok <\$> $4) [] }
@@ -252,6 +257,7 @@ idTok (L sl (TokUpperId name)) = L sl name
 idTok (L sl (TokMultiplicityId name)) = L sl name
 
 rawId :: Loc Token -> Identifier
+rawId (L _ (TokInfixId name)) = name
 rawId (L _ (TokLowerId name)) = name
 rawId (L _ (TokUpperId name)) = name
 rawId (L _ (TokMultiplicityId name)) = name

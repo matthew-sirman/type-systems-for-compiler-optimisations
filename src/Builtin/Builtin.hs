@@ -19,8 +19,11 @@ import qualified Data.HashSet as S
 import Data.Bifunctor (bimap, first, second)
 
 import Control.Monad.State
+import Control.Lens
 
 type BuiltinFunction = (Identifier, TypeScheme)
+type BuiltinConstructor = (Identifier, (TypeScheme, [Type]))
+type BuiltinType = (Identifier, (S.HashSet TypeVar, [BuiltinConstructor]))
 
 defaultBuiltins :: StaticContext
 defaultBuiltins = StaticContext functions constructors types
@@ -40,80 +43,63 @@ functions = M.fromList
     , funcUndefined
     ]
 
-constructors :: M.HashMap Identifier TypeScheme
+constructors :: M.HashMap Identifier (TypeScheme, [Type])
 constructors = M.fromList
-    [ consTrue
+    [ consUnit
+    , consTrue
     , consFalse
     , consListNil
     , consListCons
+    , consMkInt
+    , consMkReal
     ]
 
-types :: S.HashSet Identifier
-types = S.empty
+types :: M.HashMap Identifier (S.HashSet TypeVar, [BuiltinConstructor])
+types = M.fromList
+    [ typeUnit
+    , typeBool
+    , typeListCons
+    , typeInt
+    , typeReal
+    ]
 
 funcEquals, funcNotEquals, funcGreaterThan, funcLessThan, funcGreaterEqual, funcLessEqual,
     funcAdd, funcSub, funcMul, funcDiv, funcUndefined :: BuiltinFunction
-funcEquals       = (I "==", makeScheme "a -o a -o Bool")
-funcNotEquals    = (I "!=", makeScheme "a -o a -o Bool")
-funcGreaterThan  = (I ">", makeScheme "a -o a -o Bool")
-funcLessThan     = (I "<", makeScheme "a -o a -o Bool")
-funcGreaterEqual = (I ">=", makeScheme "a -o a -o Bool")
-funcLessEqual    = (I "<=", makeScheme "a -o a -o Bool")
-funcAdd          = (I "+", makeScheme "Int -o Int -o Int")
-funcSub          = (I "-", makeScheme "Int -o Int -o Int")
-funcMul          = (I "*", makeScheme "Int -o Int -o Int")
-funcDiv          = (I "/", makeScheme "Int -o Int -o Int")
+funcEquals       = (I "==#", makeScheme "Int# -o Int# -o Bool")
+funcNotEquals    = (I "!=#", makeScheme "Int# -o Int# -o Bool")
+funcGreaterThan  = (I ">#", makeScheme "Int# -o Int# -o Bool")
+funcLessThan     = (I "<#", makeScheme "Int# -o Int# -o Bool")
+funcGreaterEqual = (I ">=#", makeScheme "Int# -o Int# -o Bool")
+funcLessEqual    = (I "<=#", makeScheme "Int# -o Int# -o Bool")
+funcAdd          = (I "+#", makeScheme "Int# -o Int# -o Int#")
+funcSub          = (I "-#", makeScheme "Int# -o Int# -o Int#")
+funcMul          = (I "*#", makeScheme "Int# -o Int# -o Int#")
+funcDiv          = (I "/#", makeScheme "Int# -o Int# -o Int#")
 funcUndefined    = (I "undefined", makeScheme "a")
 
-consTrue, consFalse, consListNil, consListCons :: BuiltinFunction
-consTrue = (I "True", makeScheme "Bool")
-consFalse = (I "False", makeScheme "Bool")
-consListNil = (I "[]", makeScheme "[a]")
-consListCons = (I "::", makeScheme "a -o [a] -o [a]")
+consUnit, consTrue, consFalse, consListNil, consListCons, consMkInt, consMkReal :: BuiltinConstructor
+consUnit = (I "Unit", makeConsScheme "()")
+consTrue = (I "True", makeConsScheme "Bool")
+consFalse = (I "False", makeConsScheme "Bool")
+consListNil = (I "[]", makeConsScheme "[a]")
+consListCons = (I "::", makeConsScheme "a -o [a] -o [a]")
+consMkInt = (I "MkInt#", makeConsScheme "Int# -o Int")
+consMkReal = (I "MkReal#", makeConsScheme "Real# -o Real")
 
-type TypeBuilder a = State ( (Integer, M.HashMap Identifier Integer)
-                           , (Integer, M.HashMap Identifier Integer)
-                           ) a
+typeUnit, typeBool, typeListCons, typeInt, typeReal :: BuiltinType
+typeUnit = (I "Unit", collectTypeVars [consUnit])
+typeBool = (I "Bool", collectTypeVars [consFalse, consTrue])
+typeListCons = (I "List", collectTypeVars [consListNil, consListCons])
+typeInt = (I "Int", collectTypeVars [consMkInt])
+typeReal = (I "Real", collectTypeVars [consMkReal])
 
 makeScheme :: String -> TypeScheme
-makeScheme typeString = case parseType typeString of
-                          Right tExpr -> 
-                              let startState = ((0, M.empty), (0, M.empty))
-                                  (t, ((tvars, _), (mvars, _))) = runState (buildTypeFor tExpr) startState
-                               in TypeScheme (S.fromList [0..(tvars-1)]) (S.fromList [0..(mvars-1)]) t
-    where
-        buildTypeFor :: Loc TypeExpr -> TypeBuilder Type
-        buildTypeFor (L _ (TEGround name)) = pure (Ground name)
-        buildTypeFor (L _ (TEPoly name)) = do
-            nameMap <- gets (snd . fst)
-            case M.lookup name nameMap of
-              Just id -> pure (Poly id)
-              Nothing -> do
-                  id <- gets (fst . fst)
-                  modify (first (bimap (+1) (M.insert name id)))
-                  pure (Poly id)
-        buildTypeFor (L _ (TEApp fun arg)) = do
-            TypeApp <$> buildTypeFor fun <*> buildTypeFor arg
-        buildTypeFor (L _ (TEArrow from mul to)) = do
-            FunctionType <$> buildTypeFor from <*> buildArrowFor mul <*> buildTypeFor to
-        buildTypeFor (L _ TEUnit) = pure unitType
-        buildTypeFor (L _ (TETuple ts)) = TupleType <$> mapM buildTypeFor ts
-        buildTypeFor (L _ (TEList t)) = TypeApp listTypeCon <$> buildTypeFor t
+makeScheme = fst . makeConsScheme
 
-        buildArrowFor :: Loc ArrowExpr -> TypeBuilder Arrow
-        buildArrowFor (L _ (ArrowExpr Nothing)) = pure (Arrow (MAtom Normal))
-        buildArrowFor (L _ (ArrowExpr (Just (L _ m)))) = Arrow <$> buildMulFor m
+makeConsScheme :: String -> (TypeScheme, [Type])
+makeConsScheme typeString = case parseType typeString of
+                              Right tExpr -> typeExprToScheme tExpr
 
-        buildMulFor :: MultiplicityExpr -> TypeBuilder Multiplicity
-        buildMulFor (MEPoly name) = do
-            nameMap <- gets (snd . snd)
-            case M.lookup name nameMap of
-              Just id -> pure (MPoly id)
-              Nothing -> do
-                  id <- gets (fst . snd)
-                  modify (second (bimap (+1) (M.insert name id)))
-                  pure (MPoly id)
-        buildMulFor (MEAtom atom) = pure (MAtom atom)
-        buildMulFor (MEProd lhs rhs) = MProd <$> buildMulFor lhs <*> buildMulFor rhs
-
+collectTypeVars :: [BuiltinConstructor] -> (S.HashSet TypeVar, [BuiltinConstructor])
+collectTypeVars conss = (S.unions (map ((^. quantifiedTVars) . fst . snd) conss), conss)
 

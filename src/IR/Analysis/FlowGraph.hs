@@ -12,6 +12,9 @@ import Data.Hashable (Hashable)
 import Data.Foldable (toList)
 
 import Control.Lens
+
+import Debug.Trace
+
 type NodeID = Int
 
 data NodeType b

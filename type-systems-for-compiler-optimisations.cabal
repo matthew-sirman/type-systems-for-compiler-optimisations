@@ -67,6 +67,7 @@ library
     , hashable
     , lens
     , mtl
+    , rev-state
     , unordered-containers
   default-language: Haskell2010
 

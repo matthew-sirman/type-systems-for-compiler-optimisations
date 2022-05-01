@@ -1,71 +1,64 @@
 {-# LANGUAGE TemplateHaskell, FlexibleInstances, DeriveGeneric, MultiParamTypeClasses #-}
-module Typing.Types 
-    ( TypeError(..)
-    , VarSet
-    , TermVar
-    , TypeVar
-    , MultiplicityVar , TypeVarMap
-    , MultiplicityPoset
-    , Type(..)
-    , Multiplicity(..)
-    , Arrow(..)
-    , TypedExpr(..)
-    , TypedCaseBranch(..)
-    , TypedLetBinding(..)
-    , Pattern(..)
-    , typeof
-
-    , CheckStackFrame(..)
-    , termNameContext
-    , addedTermNames
-    , typeNameContext
-    , mulNameContext
-
-    , CheckVarFrame(..)
-    , affineVars
-    , relevantVars
-    , zeroVars
-
-    , CheckState(..)
-    , stackFrame
-    , varFrame 
-    , freshTermVars
-    , freshTypeVars
-    , typeEquivalences
-    , freshMulVars
-    , mulEquivalences
-    , mulRelation
-    , termVarAssignments
-    , typeVarAssignments
-    , mulVarAssignments
-
-    , pushStackFrame
-    , popStackFrame
-    , pushVarFrame
-    , popVarFrame
-
-    , CheckerState
-    , Checker
-    , TypeScheme(..), quantifiedTVars, quantifiedMVars, baseType
-    , Context(..), termContext
-    , StaticContext(..), defaultFunctions, dataConstructors, dataTypes
-    , Typed(..)
-
-    , emptyContext
-    , emptyCheckState
-
-    , typeError
-    , showError, showType
-    ) where
+module Typing.Types where
+--    ( TypeError(..)
+--    , VarSet
+--    , TermVar
+--    , TypeVar
+--    , MultiplicityVar , TypeVarMap
+--    , MultiplicityPoset
+--    , Type(..)
+--    , Multiplicity(..)
+--    , Arrow(..)
+--    , TypedExpr(..)
+--    , TypedCaseBranch(..)
+--    , TypedLetBinding(..)
+--    , Pattern(..)
+--    , typeof
+--
+--    , CheckStackFrame(..)
+--    , termNameContext
+--    , addedTermNames
+--    , typeNameContext
+--    , mulNameContext
+--
+--    , CheckVarFrame(..)
+--    , affineVars
+--    , relevantVars
+--    , zeroVars
+--
+--    , CheckState(..)
+--    , stackFrame
+--    , varFrame 
+--    , freshTermVars
+--    , freshTypeVars
+--    , typeEquivalences
+--    , freshMulVars
+--    , mulEquivalences
+--    , mulRelation
+--    , termVarAssignments
+--    , typeVarAssignments
+--    , mulVarAssignments
+--
+--    , pushStackFrame
+--    , popStackFrame
+--    , pushVarFrame
+--    , popVarFrame
+--
+--    , CheckerState
+--    , Checker
+--    , TypeScheme(..), quantifiedTVars, quantifiedMVars, baseType
+--    , Context(..), termContext
+--    , StaticContext(..), defaultFunctions, dataConstructors, dataTypes
+--    , Typed(..)
+--
+--    , emptyContext
+--    , emptyCheckState
+--
+--    , typeError
+--    , showError, showType
+--    ) where
 
 import Parser.AST
-    ( Identifier(..)
-    , SourceLocation(..)
-    , Loc(..)
-    , SourcePattern(..)
-    , MultiplicityAtom(..)
-    , Literal(..)
-    )
 
 import qualified Util.Stream as Stream
 import qualified Util.BoundedPoset as P
@@ -77,6 +70,7 @@ import qualified Data.DisjointSet as DS
 import qualified Data.DisjointMap as DM
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
+import Data.Bifunctor (bimap, first, second)
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -95,6 +89,7 @@ data TypeError
     | DuplicateVariableDefinition SourceLocation Identifier
     | VariableNotInScope SourceLocation Identifier
     | ConstructorNotInScope SourceLocation Identifier
+    | MissingType SourceLocation Identifier
     | IncompletePattern SourceLocation Identifier
     | TooManyArguments SourceLocation Identifier
     | GroundUnificationFailure SourceLocation Identifier Identifier
@@ -121,7 +116,14 @@ data Type
     | TypeApp Type Type
     | FunctionType Type Arrow Type
     | TupleType [Type]
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord)
+
+instance Show Type where
+    show (Poly tv) = "'" ++ show tv
+    show (Ground name) = show name
+    show (TypeApp fun arg) = "(" ++ show fun ++ " " ++ show arg ++ ")"
+    show (FunctionType from arrow to) = "(" ++ show from ++ " " ++ show arrow ++ " " ++ show to ++ ")"
+    show (TupleType ts) = "(" ++ intercalate ", " (map show ts) ++ ")"
 
 data Multiplicity
     = MPoly MultiplicityVar
@@ -180,7 +182,14 @@ data TypedExpr
     | Lambda Type Multiplicity Pattern TypedExpr
     | Variable Type Identifier
     | Literal Type (Literal TypedExpr)
-    deriving Show
+
+instance Show TypedExpr where
+    show (Let _ binds body) = "let " ++ intercalate " and " (map show binds) ++ " in " ++ show body
+    show (Case _ mul disc branches) = "case " ++ show mul ++ " " ++ show disc ++ " of " ++ intercalate "; " (map show (NE.toList branches))
+    show (Application _ fun arg) = "(" ++ show fun ++ " " ++ show arg ++ ")"
+    show (Lambda t mul pat body) = "\\" ++ show pat ++ " -> " ++ show mul ++ " " ++ show body
+    show (Variable _ name) = show name
+    show (Literal _ lit) = show lit
     
 instance TypeContainer TypedExpr where
     typeof (Let t _ _) = t
@@ -191,13 +200,17 @@ instance TypeContainer TypedExpr where
     typeof (Literal t _) = t
 
 data TypedLetBinding = TypedLetBinding Multiplicity Pattern TypedExpr
-    deriving Show
+
+instance Show TypedLetBinding where
+    show (TypedLetBinding mul pat body) = show mul ++ " " ++ show pat ++ " = " ++ show body
 
 instance TypeContainer TypedLetBinding where
     typeof (TypedLetBinding _ _ e) = typeof e
 
 data TypedCaseBranch = TypedCaseBranch Pattern TypedExpr
-    deriving Show
+
+instance Show TypedCaseBranch where
+    show (TypedCaseBranch pat body) = show pat ++ " -> " ++ show body
 
 instance TypeContainer TypedCaseBranch where
     typeof (TypedCaseBranch _ e) = typeof e
@@ -206,7 +219,11 @@ data Pattern
     = VariablePattern Type Identifier
     | ConstructorPattern Identifier [Pattern]
     | LiteralPattern (Literal Pattern)
-    deriving Show
+
+instance Show Pattern where
+    show (VariablePattern t name) = "(" ++ show name ++ " : " ++ show t ++ ")"
+    show (ConstructorPattern name ps) = "(" ++ show name ++ " " ++ unwords (map show ps) ++ ")"
+    show (LiteralPattern lit) = show lit
 
 data CheckStackFrame = CheckStackFrame
     { _termNameContext :: M.HashMap Identifier TermVar
@@ -302,9 +319,10 @@ makeLenses ''Context
 
 data StaticContext = StaticContext
     { _defaultFunctions :: M.HashMap Identifier TypeScheme
-    , _dataConstructors :: M.HashMap Identifier TypeScheme
-    , _dataTypes :: S.HashSet Identifier
+    , _dataConstructors :: M.HashMap Identifier (TypeScheme, [Type])
+    , _dataTypes :: M.HashMap Identifier (S.HashSet TypeVar, [(Identifier, (TypeScheme, [Type]))])
     }
+    deriving Show
 
 makeLenses ''StaticContext
 
@@ -380,6 +398,61 @@ popVarFrame = do
       (top:rest) -> modify ( (varStack .~ rest)
                            . (varFrame .~ top))
 
+intType, realType, unitType, boolType, listTypeCon :: Type
+intType = Ground (I "Int")
+realType = Ground (I "Real")
+unitType = Ground (I "Unit")
+boolType = Ground (I "Bool")
+listTypeCon = Ground (I "List")
+
+type TypeBuilder a = State ( (Integer, M.HashMap Identifier Integer)
+                           , (Integer, M.HashMap Identifier Integer)
+                           ) a
+
+typeExprToScheme :: Loc TypeExpr -> (TypeScheme, [Type])
+typeExprToScheme tExpr =
+    let startState = ((0, M.empty), (0, M.empty))
+        (t, ((tvars, _), (mvars, _))) = runState (buildTypeFor tExpr) startState
+     in (TypeScheme (S.fromList [0..(tvars-1)]) (S.fromList [0..(mvars-1)]) t, findArgTypes t)
+    where
+        buildTypeFor :: Loc TypeExpr -> TypeBuilder Type
+        buildTypeFor (L _ (TEGround name)) = pure (Ground name)
+        buildTypeFor (L _ (TEPoly name)) = do
+            nameMap <- gets (snd . fst)
+            case M.lookup name nameMap of
+              Just id -> pure (Poly id)
+              Nothing -> do
+                  id <- gets (fst . fst)
+                  modify (first (bimap (+1) (M.insert name id)))
+                  pure (Poly id)
+        buildTypeFor (L _ (TEApp fun arg)) = do
+            TypeApp <$> buildTypeFor fun <*> buildTypeFor arg
+        buildTypeFor (L _ (TEArrow from mul to)) = do
+            FunctionType <$> buildTypeFor from <*> buildArrowFor mul <*> buildTypeFor to
+        buildTypeFor (L _ TEUnit) = pure unitType
+        buildTypeFor (L _ (TETuple ts)) = TupleType <$> mapM buildTypeFor ts
+        buildTypeFor (L _ (TEList t)) = TypeApp listTypeCon <$> buildTypeFor t
+
+        buildArrowFor :: Loc ArrowExpr -> TypeBuilder Arrow
+        buildArrowFor (L _ (ArrowExpr Nothing)) = pure (Arrow (MAtom Normal))
+        buildArrowFor (L _ (ArrowExpr (Just (L _ m)))) = Arrow <$> buildMulFor m
+
+        buildMulFor :: MultiplicityExpr -> TypeBuilder Multiplicity
+        buildMulFor (MEPoly name) = do
+            nameMap <- gets (snd . snd)
+            case M.lookup name nameMap of
+              Just id -> pure (MPoly id)
+              Nothing -> do
+                  id <- gets (fst . snd)
+                  modify (second (bimap (+1) (M.insert name id)))
+                  pure (MPoly id)
+        buildMulFor (MEAtom atom) = pure (MAtom atom)
+        buildMulFor (MEProd lhs rhs) = MProd <$> buildMulFor lhs <*> buildMulFor rhs
+
+        findArgTypes :: Type -> [Type]
+        findArgTypes (FunctionType from _ to) = from : findArgTypes to
+        findArgTypes _ = []
+
 typeError :: TypeError -> Checker a
 typeError err = do
     varMap <- gets (^. typeVarAssignments)
@@ -396,6 +469,8 @@ showError text tvm (VariableNotInScope loc name) =
     showContext text loc ++ "Variable \"" ++ show name ++ "\" not in scope."
 showError text tvm (ConstructorNotInScope loc name) =
     showContext text loc ++ "Data constructor \"" ++ show name ++ "\" not in scope."
+showError text tvm (MissingType loc name) = 
+    showContext text loc ++ "Type constructor \"" ++ show name ++ "\" not in scope."
 showError text tvm (IncompletePattern loc name) =
     showContext text loc ++ "Data constructor \"" ++ show name ++ "\" has an incomplete pattern."
 showError text tvm (TooManyArguments loc name) =
@@ -416,7 +491,7 @@ showError text tvm (MAtomUnificationFailure loc a a') =
 showError text tvm (MOrderingViolation loc m m') =
     showContext text loc ++ "Failed to add \"" ++ show m ++ " <= " ++ show m' ++ "\" to contraint graph."
 showError text tvm (EntailmentFailure loc t) =
-    showContext text loc ++ "Inferred type cannot entail annotated type \"" ++ showType tvm t ++ "\"."
+    showContext text loc ++ "Inferred type \"" ++ showType tvm t ++ "\" cannot entail annotated type."
 showError text tvm (EntailmentMultiAssign loc tv) =
     showContext text loc ++ "Type variable '" ++ show tv ++ "' was assigned to multiple types in entailment."
 showError _ _ (GenericError Nothing message) =

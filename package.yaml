@@ -27,6 +27,7 @@ library:
   dependencies:
   - array
   - mtl
+  - rev-state
   - unordered-containers
   - containers
   - disjoint-containers

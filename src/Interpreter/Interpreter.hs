@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell, RankNTypes #-}
 module Interpreter.Interpreter where
 
 import IR.Instructions (BinaryOperator(..), Immediate(..))
@@ -14,6 +14,9 @@ import Data.Array.IO
 import Data.Word
 import Data.Bits
 
+import Text.Printf
+
+-- TODO: Remove
 import Debug.Trace
 
 data ProgramStats = ProgramStats
@@ -53,14 +56,16 @@ makeLenses ''InterpreterState
 data InterpreterSettings = ISettings
     { _heapSize :: Word64
     , _debug :: Bool
+    , _showExecInstruction :: Bool
     , _showBytecode :: Bool
     }
 
 makeLenses ''InterpreterSettings
 
 defaultSettings, debugMode :: InterpreterSettings
-defaultSettings = ISettings 65536 False False
-debugMode = ISettings 65536 True True
+defaultSettings = ISettings 65536 False False False
+debugMode = ISettings 65536 True False True
+strongDebugMode = ISettings 65536 True True True
 
 type Interpreter a = ExceptT Int (StateT InterpreterState IO) a
 
@@ -88,12 +93,13 @@ interpret settings bytecode = do
     (programResult, endState) <- runStateT (runExceptT (forever (fetch >>= step))) initialState
     case programResult of
       Left 0 -> do
+          putStrLn ""
           when (settings ^. debug) $ do
               putStrLn $ "Total memory use: " ++ show (endState ^. allocated)
               print (endState ^. programStats)
-              putStrLn ""
-              putStrLn "Result:"
-          print (endState ^. returnVal)
+          --     putStrLn ""
+          --     putStrLn "Result:"
+          -- print (endState ^. returnVal)
       Left (-1) -> putStrLn "Ran out of heap memory!"
       Left code -> putStrLn $ "Exception thrown (" ++ show code ++ ")."
 
@@ -102,6 +108,8 @@ interpret settings bytecode = do
         fetch = do
             pc <- gets (^. programCounter)
             let instruction = (bytecode ^. instructions) ! pc
+            when (settings ^. showExecInstruction) $ do
+                liftIO $ putStrLn $ show pc ++ " " ++ show instruction
             modify (programCounter %~ (+1))
             modify (programStats . instructionsExecuted %~ (+1))
             pure instruction
@@ -161,8 +169,18 @@ step (Pop reg) = do
     case vstack of
       (top:rest) -> do
           modify (stack .~ rest)
-          storeVal reg top
+          case reg of
+            Just r -> storeVal r top
+            Nothing -> pure ()
       [] -> throwError 3
+step (PrintF fmt args) = do
+    argVals <- mapM loadVal args
+    let printStr = mkString (printf fmt) argVals
+    liftIO $ putStr printStr
+    where
+        mkString :: (PrintfArg a, PrintfType r) => (forall r'. PrintfType r' => r') -> [a] -> r
+        mkString base [] = base
+        mkString base (x:xs) = mkString (base x) xs
 step (Throw err) = throwError err
 step (CodeLabel _) = pure ()
 

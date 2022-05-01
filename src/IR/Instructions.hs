@@ -50,15 +50,15 @@ instance Show r => Show (Value r) where
     show (ValFunction _ fn) = "&" ++ show fn
     show (ValSizeOf dt) = "sizeof(" ++ show dt ++ ")"
 
-dataType :: Value r -> DataType
-dataType (ValImmediate (Int64 _)) = FirstOrder Int64T
-dataType (ValImmediate (Real64 _)) = FirstOrder Real64T
-dataType (ValImmediate (Int1 _)) = FirstOrder Int1T
-dataType (ValImmediate Unit) = FirstOrder UnitT
-dataType (ValImmediate Undef) = FirstOrder Void
-dataType (ValVariable t _) = t
-dataType (ValFunction t _) = t
-dataType (ValSizeOf _) = FirstOrder Int64T
+instance DataTypeContainer (Value r) where
+    datatype (ValImmediate (Int64 _)) = FirstOrder Int64T
+    datatype (ValImmediate (Real64 _)) = FirstOrder Real64T
+    datatype (ValImmediate (Int1 _)) = FirstOrder Int1T
+    datatype (ValImmediate Unit) = FirstOrder UnitT
+    datatype (ValImmediate Undef) = FirstOrder Void
+    datatype (ValVariable t _) = t
+    datatype (ValFunction t _) = t
+    datatype (ValSizeOf _) = FirstOrder Int64T
 
 newtype PhiNode r = PhiNode (Value r, Label)
 
@@ -79,6 +79,7 @@ data Instruction r
     | Jump Label
     | Phi r [PhiNode r]
     | Return (Maybe (Value r))
+    | PrintF String [Value r]
     | Throw Int
 
 instance Show r => Show (Instruction r) where
@@ -100,6 +101,8 @@ instance Show r => Show (Instruction r) where
     show (Phi res ps) = show res ++ " = phi [" ++ intercalate ", " (map show ps) ++ "]"
     show (Return Nothing) = "ret"
     show (Return (Just val)) = "ret " ++ show val
+    show (PrintF fmt []) = "call printf(" ++ show fmt ++ ")"
+    show (PrintF fmt args) = "call printf(" ++ show fmt ++ ", " ++ intercalate ", " (map show args) ++ ")"
     show (Throw err) = "throw " ++ show err
 
 data BinaryOperator

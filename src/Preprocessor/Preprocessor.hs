@@ -89,6 +89,13 @@ transformAST stmts ctx =
 
         addTypeDef :: TypeDefinition -> Preprocessor ()
         addTypeDef (TypeDefinition name pArgs mArgs conss) = do
-            modify (dataTypes %~ S.insert (syntax name))
-
+            constructors <- forM conss $ \(L _ (Annotated cons (Just consType))) -> do
+                let consName = syntax cons
+                    consScheme = typeExprToScheme consType
+                modify (dataConstructors %~ M.insert consName consScheme)
+                pure (consName, consScheme)
+            let tvs = S.unions (map ((^. quantifiedTVars) . fst . snd) constructors)
+            modify (dataTypes %~ M.insert (syntax name) (tvs, constructors))
+                
+        -- TODO: Check type definition well-formedness
 
