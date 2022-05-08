@@ -61,7 +61,7 @@ runTypeChecker source ctx ve = do
 
 compileProgram :: StaticContext -> MultiplicityPoset -> TypedExpr -> Process Program
 compileProgram staticContext ps expr = do
-    pure (traceShowId (compile staticContext ps expr))
+    pure (compile staticContext ps expr)
 
 generate :: Program -> Process Bytecode
 generate program =
@@ -78,6 +78,7 @@ pipeline = do
     (expr, ctx) <- preprocess source
     (typedExpr, ps) <- runTypeChecker source ctx expr
     program <- compileProgram ctx ps typedExpr
+    liftIO $ print program
     bytecode <- generate program
     executeBytecode opt bytecode
 

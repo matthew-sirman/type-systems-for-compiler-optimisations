@@ -5,7 +5,7 @@ import Parser.Parser (test_parseExpr)
 import Typing.Types
 import Typing.Judgement
 import qualified Util.Stream as Stream
-import qualified Util.BoundedPoset as P
+import qualified Util.ConstrainedPoset as P
 
 import qualified Builtin.Builtin as B
 import qualified Builtin.Types as B
@@ -54,6 +54,8 @@ typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheck
             Lambda <$> typeRepresentative t <*> pure mul <*> remapPattern arg <*> remapToReps body
         remapToReps (Variable t name) =
             Variable <$> typeRepresentative t <*> pure name
+        remapToReps (Tuple t ts) =
+            Tuple <$> typeRepresentative t <*> mapM remapToReps ts
         remapToReps (Literal t lit) =
             Literal <$> typeRepresentative t <*> pure lit
 
@@ -95,7 +97,7 @@ typecheck' ctx (L _ (VELet bindings body)) = do
                 patterns = map (\(Annotated pattern _) -> pattern) annotatedPatterns
 
             -- We create new type variables for each of the annotated patterns
-            initialBoundTypes <- mapM annotationToType annotatedPatterns
+            initialBoundTypes <- mapM (annotationToType ctx) annotatedPatterns
             pushStackFrame
             -- We extend the context with the new type variables in order to type check the
             -- bound expressions
@@ -103,7 +105,7 @@ typecheck' ctx (L _ (VELet bindings body)) = do
             -- We always extend with normal multiplicity for recursive function bindings.
             (ctx', _) <- extendNormal ctx (zip3 (repeat $ MAtom Normal) patterns initialBoundTypes)
             -- Next, we map over checking each binding to get a list of the types we inferred
-            result <- mapM (checkBinding ctx') (zip (map syntax bindings) initialBoundTypes)
+            result <- mapM (checkBinding ctx') (zip (map syntax bindings) (map (^. baseType) initialBoundTypes))
             popStackFrame
             pure result
 
@@ -175,7 +177,7 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
         checkBranch caseMul discType (CaseBranch pattern body) = do
             -- Extend the context with the pattern under the constraint provided by the case statement
             pushStackFrame
-            (ctx', pats) <- extendNormal ctx [(caseMul, pattern, discType)]
+            (ctx', pats) <- extendNormal ctx [(caseMul, pattern, TypeScheme S.empty S.empty discType)]
             let [pat] = pats
             -- Check the branch itself
             typedBranch <- typecheck' ctx' body
@@ -231,29 +233,30 @@ typecheck' ctx (L _ (VEApp fun arg)) = do
         unpackFunMul _ = pure (MAtom Normal)
 
 typecheck' ctx (L _ (VELambda (L _ ann@(Annotated pattern patType)) (L _ (ArrowExpr arrow)) body)) = do
-    argType <- annotationToType ann
+    argType <- annotationToType ctx ann
     arrowMul <- annotationToMultiplicity arrow
     pushStackFrame
     (ctx', pats) <- extendNormal ctx [(arrowMul, pattern, argType)]
     let [pat] = pats
     typedBody <- typecheck' ctx' body
-    checkTypeEntails ctx argType patType
+    checkTypeEntails ctx (argType ^. baseType) patType
     checkRelevant
     popStackFrame
-    pure (Lambda (FunctionType argType (Arrow arrowMul) (typeof typedBody)) arrowMul pat typedBody)
+    pure (Lambda (FunctionType (argType ^. baseType) (Arrow arrowMul) (typeof typedBody)) arrowMul pat typedBody)
 
 typecheck' ctx (L loc (VEVar x)) = Variable <$> contextLookup ctx loc x <*> pure x
 
 typecheck' ctx (L _ (VELiteral lit)) = typecheckLiteral ctx lit
 
 typecheckLiteral :: Context -> Literal (Loc ValExpr) -> Checker TypedExpr
-typecheckLiteral _ (IntLiteral i) = pure (Literal intType (IntLiteral i))
+typecheckLiteral _ (IntLiteral i) = pure (Literal intType (IntLit i))
 
-typecheckLiteral _ (RealLiteral r) = pure (Literal realType (RealLiteral r))
+typecheckLiteral _ (RealLiteral r) = pure (Literal realType (RealLit r))
 
 typecheckLiteral ctx (ListLiteral es) = do
     initialListType <- freshPolyType
-    Literal (TypeApp listTypeCon initialListType) . ListLiteral <$> mapM (unifyElements initialListType) es
+    elements <- mapM (unifyElements initialListType) es
+    pure (constructList (TypeApp listTypeCon initialListType) elements)
     where
         unifyElements :: Type -> Loc ValExpr -> Checker TypedExpr
         unifyElements t expr = do
@@ -261,14 +264,24 @@ typecheckLiteral ctx (ListLiteral es) = do
             unify (location expr) (typeof t') t
             pure t'
 
+        constructList :: Type -> [TypedExpr] -> TypedExpr
+        constructList t [] = Variable t (I "[]")
+        -- constructList t (x:xs) = Application t x (constructList t xs)
+
 typecheckLiteral ctx (TupleLiteral exprs) = do
     typedExprs <- mapM (typecheck' ctx) exprs
-    pure (Literal (TupleType (map typeof typedExprs)) (TupleLiteral typedExprs))
+    pure (Tuple (TupleType (map typeof typedExprs)) typedExprs)
 
 testEverything :: String -> IO ()
 testEverything s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
                      Left (e, tvm) -> putStrLn (showError s tvm e)
                      Right (t, _) -> putStrLn (showType M.empty (typeof t))
+    where
+        fromRight (Right x) = x
+
+typeCheckExpr :: String -> (TypedExpr, MultiplicityPoset)
+typeCheckExpr s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
+                     Right (t, p) -> (t, p)
     where
         fromRight (Right x) = x
 

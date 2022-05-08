@@ -46,7 +46,9 @@ transformAST stmts ctx =
         transform' (L _ (TypeDecl name _) : _) =
             throwError (NoMatchingImplementation (location name) (syntax name))
         transform' (fLoc@(L _ (FuncDecl name body)):rest) = do
-            let mul = Just (L (location name) (MEAtom Normal))
+            let mul
+                    | syntax name == I "main" = Just (L (location name) (MEAtom Linear))
+                    | otherwise = Just (L (location name) (MEAtom Normal))
                 bindName = L (location name) (Annotated (fmap VarPattern name) Nothing)
                 func = LetBinding mul bindName body <$ fLoc
             (func:) <$> transform' rest

@@ -51,7 +51,7 @@ getPrimitive (I "/#") = Just Div
 getPrimitive (I "undefined") = Just Undefined
 getPrimitive _ = Nothing
 
-generatePrimitive :: IR.MonadIRBuilder r m => m r -> PrimitiveFunction -> [IR.Value r] -> m (IR.Value r)
+generatePrimitive :: IR.MonadIRBuilder r e m => m r -> PrimitiveFunction -> [IR.Value r] -> m (IR.Value r)
 generatePrimitive getReg Equal [lhs, rhs] = IR.binop IR.Equal getReg lhs rhs
 generatePrimitive getReg NotEqual [lhs, rhs] = IR.binop IR.NotEqual getReg lhs rhs
 generatePrimitive getReg GreaterThan [lhs, rhs] = IR.binop IR.GreaterThan getReg lhs rhs
@@ -63,7 +63,7 @@ generatePrimitive getReg Sub [lhs, rhs] = IR.binop IR.Sub getReg lhs rhs
 generatePrimitive getReg Mul [lhs, rhs] = IR.binop IR.Mul getReg lhs rhs
 generatePrimitive getReg Div [lhs, rhs] = IR.binop IR.Div getReg lhs rhs
 generatePrimitive _ Undefined _ = do
-    IR.throw 2
+    IR.throwUndefined
     pure (IR.ValImmediate IR.Undef)
 
 -- functions :: M.HashMap Identifier (PrimitiveFunction r)
@@ -104,6 +104,6 @@ generatePrimitive _ Undefined _ = do
 --     IR.throw 2
 --     pure (IR.ValImmediate IR.Undef)
 
-thunkTagStruct :: IR.Struct
-thunkTagStruct = IR.Struct "thunk_tag" [] [IR.FirstOrder IR.Int1T] True
+-- thunkTagStruct :: IR.Struct
+-- thunkTagStruct = IR.Struct "thunk_tag" [] [IR.FirstOrder IR.Int1T] True
 

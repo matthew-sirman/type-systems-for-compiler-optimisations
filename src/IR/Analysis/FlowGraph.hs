@@ -55,7 +55,7 @@ instance Show b => Show (FlowGraph b) where
 
 type NodeIDMap = M.HashMap IR.Label NodeID
 
-buildFlowGraph :: forall r. IR.Function r -> (FlowGraph (IR.BasicBlock r), NodeIDMap)
+buildFlowGraph :: forall r e. IR.Function r e -> (FlowGraph (IR.BasicBlock r e), NodeIDMap)
 buildFlowGraph fun =
     let graph = FlowGraph
             { _nodes = backwardPass
@@ -71,41 +71,41 @@ buildFlowGraph fun =
         entryNodeID = 0
         exitNodeID = Seq.length (fun ^. IR.blocks) + 1
 
-        entryNode, exitNode :: Node (IR.BasicBlock r)
+        entryNode, exitNode :: Node (IR.BasicBlock r e)
         entryNode = Node EntryNode S.empty (S.singleton 1)
         exitNode = Node ExitNode S.empty S.empty
 
-        forwardPass :: M.HashMap NodeID (Node (IR.BasicBlock r))
+        forwardPass :: M.HashMap NodeID (Node (IR.BasicBlock r e))
         forwardPass = pass (fun ^. IR.blocks) (M.fromList [(entryNodeID, entryNode), (exitNodeID, exitNode)])
             where
-                pass :: Seq.Seq (IR.BasicBlock r) -> M.HashMap NodeID (Node (IR.BasicBlock r))
-                     -> M.HashMap NodeID (Node (IR.BasicBlock r))
+                pass :: Seq.Seq (IR.BasicBlock r e) -> M.HashMap NodeID (Node (IR.BasicBlock r e))
+                     -> M.HashMap NodeID (Node (IR.BasicBlock r e))
                 pass Seq.Empty = id
                 pass (last :<| Seq.Empty) = M.insert (blockNameMap M.! (last ^. IR.label)) node
                     where
-                        node :: Node (IR.BasicBlock r)
+                        node :: Node (IR.BasicBlock r e)
                         node = addLinks exitNodeID last (Node (BlockNode last) S.empty S.empty)
                 pass (blk :<| rest@(next :<| _)) = pass rest . M.insert (blockNameMap M.! (blk ^. IR.label)) node
                     where
-                        node :: Node (IR.BasicBlock r)
+                        node :: Node (IR.BasicBlock r e)
                         node = addLinks (blockNameMap M.! (next ^. IR.label)) blk (Node (BlockNode blk) S.empty S.empty)
 
-                addLinks :: NodeID -> IR.BasicBlock r -> Node (IR.BasicBlock r)
-                         -> Node (IR.BasicBlock r)
+                addLinks :: NodeID -> IR.BasicBlock r e -> Node (IR.BasicBlock r e)
+                         -> Node (IR.BasicBlock r e)
                 addLinks next bb = outEdges %~ updateLinks next (bb ^. IR.iList)
                 
-                updateLinks :: NodeID -> Seq (IR.Instruction r) -> S.HashSet NodeID -> S.HashSet NodeID
+                updateLinks :: NodeID -> Seq (IR.Instruction r e) -> S.HashSet NodeID -> S.HashSet NodeID
                 updateLinks _ (_ :|> IR.Jump lab) = S.insert (blockNameMap M.! lab)
                 updateLinks next (_ :|> IR.Branch _ lab) = S.insert (blockNameMap M.! lab) . S.insert next
                 updateLinks _ (_ :|> IR.Return _) = S.insert exitNodeID
                 updateLinks next _ = S.insert next
 
-        backwardPass :: M.HashMap NodeID (Node (IR.BasicBlock r))
+        backwardPass :: M.HashMap NodeID (Node (IR.BasicBlock r e))
         backwardPass = M.foldlWithKey linkEdges forwardPass forwardPass
             where
-                linkEdges :: M.HashMap NodeID (Node (IR.BasicBlock r)) -> NodeID
-                          -> Node (IR.BasicBlock r)
-                          -> M.HashMap NodeID (Node (IR.BasicBlock r))
+                linkEdges :: M.HashMap NodeID (Node (IR.BasicBlock r e)) -> NodeID
+                          -> Node (IR.BasicBlock r e)
+                          -> M.HashMap NodeID (Node (IR.BasicBlock r e))
                 linkEdges acc nid node = foldl (flip (M.adjust (addEdge nid))) acc (node ^. outEdges)
 
                 addEdge :: NodeID -> Node b -> Node b

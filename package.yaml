@@ -35,6 +35,7 @@ library:
   - hashable
   - binary
   - bytestring
+  - data-fix
 
 executables:
   type-systems-for-compiler-optimisations-exe:

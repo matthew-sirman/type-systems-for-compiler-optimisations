@@ -1,6 +1,6 @@
 {-# LANGUAGE TemplateHaskell, ScopedTypeVariables, MultiParamTypeClasses, FunctionalDependencies, Rank2Types #-}
-module Util.BoundedPoset
-     ( BoundedPoset
+module Util.ConstrainedPoset
+     ( ConstrainedPoset
      , FixedCorePoset(..)
      -- Construction
      , empty
@@ -31,12 +31,12 @@ data RelationElem core a = RelationElem
 
 makeLenses ''RelationElem
 
-newtype BoundedPoset core a = BoundedPoset
+newtype ConstrainedPoset core a = ConstrainedPoset
     { _lessThan :: M.HashMap a (RelationElem core a, RelationElem core a)
     }
     deriving Show
 
-makeLenses ''BoundedPoset
+makeLenses ''ConstrainedPoset
 
 data TightenResult result
     = Failed
@@ -77,10 +77,10 @@ class FixedCorePoset core a | core -> a, a -> core where
 --------------------------------
 --------------------------------
 
-empty :: BoundedPoset c a
-empty = BoundedPoset M.empty
+empty :: ConstrainedPoset c a
+empty = ConstrainedPoset M.empty
 
-fromList :: (Eq core, Eq a, Hashable a, FixedCorePoset core a) => [(a, a)] -> Maybe (BoundedPoset core a)
+fromList :: (Eq core, Eq a, Hashable a, FixedCorePoset core a) => [(a, a)] -> Maybe (ConstrainedPoset core a)
 fromList = addLeqs empty
 
 --------------------------------
@@ -90,7 +90,7 @@ fromList = addLeqs empty
 --------------------------------
 
 addLeq :: forall core a. (Eq core, Eq a, Hashable a, FixedCorePoset core a)
-       => a -> a -> BoundedPoset core a -> Maybe (BoundedPoset core a)
+       => a -> a -> ConstrainedPoset core a -> Maybe (ConstrainedPoset core a)
 addLeq l r setInit
     | l == r = Just setInit
     | otherwise =
@@ -114,10 +114,10 @@ addLeq l r setInit
               traverseTighten _1 lub l r set' >>= traverseTighten _2 glb r l
         where
             traverseTighten :: Lens' (RelationElem core a, RelationElem core a) (RelationElem core a) -> (core -> core -> core)
-                            -> a -> a -> BoundedPoset core a -> Maybe (BoundedPoset core a)
+                            -> a -> a -> ConstrainedPoset core a -> Maybe (ConstrainedPoset core a)
             traverseTighten selector joiner p q set = snd <$> execStateT (traverseTighten' p q) (S.empty, set)
                 where
-                    traverseTighten' :: a -> a -> StateT (S.HashSet a, BoundedPoset core a) Maybe ()
+                    traverseTighten' :: a -> a -> StateT (S.HashSet a, ConstrainedPoset core a) Maybe ()
                     traverseTighten' from to = do
                         (visited, current) <- get
                         toElem <- lift $ M.lookup to (current ^. lessThan)
@@ -131,14 +131,14 @@ addLeq l r setInit
 
             traverseTightenBackward set p q = snd <$> execStateT (traverseTighten' p q) (S.empty, set)
                 where
-                    traverseTighten' :: a -> a -> StateT (S.HashSet a, BoundedPoset core a) Maybe ()
+                    traverseTighten' :: a -> a -> StateT (S.HashSet a, ConstrainedPoset core a) Maybe ()
                     traverseTighten' from to = do
                         undefined
 
 tighten :: (Eq core, Eq a, Hashable a, FixedCorePoset core a)
         => Lens' (RelationElem core a, RelationElem core a) (RelationElem core a)
         -> (core -> core -> core)
-        -> a -> a -> BoundedPoset core a -> TightenResult (BoundedPoset core a)
+        -> a -> a -> ConstrainedPoset core a -> TightenResult (ConstrainedPoset core a)
 tighten selector joiner left right set = do
     leftElem <- (^. selector) <$> maybe Failed pure (M.lookup left (set ^. lessThan))
     rightElem <- (^. selector) <$> maybe Failed pure (M.lookup right (set ^. lessThan))
@@ -153,7 +153,7 @@ tighten selector joiner left right set = do
     pure set'
 
 addLeqs :: (Eq core, Eq a, Hashable a, FixedCorePoset core a)
-        => BoundedPoset core a -> [(a, a)] -> Maybe (BoundedPoset core a)
+        => ConstrainedPoset core a -> [(a, a)] -> Maybe (ConstrainedPoset core a)
 addLeqs = foldM (flip $ uncurry addLeq)
 
 -------------------------
@@ -162,12 +162,12 @@ addLeqs = foldM (flip $ uncurry addLeq)
 -------------------------
 -------------------------
 
-leq :: (Eq a, Hashable a, FixedCorePoset core a) => a -> a -> BoundedPoset core a -> Bool
+leq :: (Eq a, Hashable a, FixedCorePoset core a) => a -> a -> ConstrainedPoset core a -> Bool
 leq a b p = case (unembed a, unembed b) of
               (Just a', Just b') -> a' <=? b'
               _ -> reachable a b p
 
-reachable :: forall core a. (Eq a, Hashable a) => a -> a -> BoundedPoset core a -> Bool
+reachable :: forall core a. (Eq a, Hashable a) => a -> a -> ConstrainedPoset core a -> Bool
 reachable lhs rhs set
     | lhs == rhs = True
     | otherwise = (`evalState` S.empty) $
@@ -189,12 +189,12 @@ reachable lhs rhs set
                                Just elem -> elem ^. _1.edges
                                Nothing -> S.empty
 
-equivalent :: (Eq a, Hashable a) => a -> a -> BoundedPoset core a -> Bool
+equivalent :: (Eq a, Hashable a) => a -> a -> ConstrainedPoset core a -> Bool
 equivalent lhs rhs set
     | lhs == rhs = True
     | otherwise = reachable lhs rhs set && reachable rhs lhs set
 
-maybeLeq :: (Eq a, Hashable a, FixedCorePoset core a) => a -> core -> BoundedPoset core a -> Bool
+maybeLeq :: (Eq a, Hashable a, FixedCorePoset core a) => a -> core -> ConstrainedPoset core a -> Bool
 maybeLeq v c poset = case M.lookup v (poset ^. lessThan) of
                        Just elem -> (elem ^. _1.bound) <=? c
                        Nothing -> 
@@ -205,7 +205,7 @@ maybeLeq v c poset = case M.lookup v (poset ^. lessThan) of
                                    Just (l, r) -> maybeLeq l c poset || maybeLeq r c poset
                                    Nothing -> True
 
-unlimited :: (Eq a, Hashable a, Eq core, FixedCorePoset core a) => a -> BoundedPoset core a -> Bool
+unlimited :: (Eq a, Hashable a, Eq core, FixedCorePoset core a) => a -> ConstrainedPoset core a -> Bool
 unlimited v set = case M.lookup v (set ^. lessThan) of
                     Just elem -> (elem ^. _1.bound == bottom) && (elem ^. _2.bound == top)
                     Nothing ->

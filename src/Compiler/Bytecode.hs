@@ -63,8 +63,11 @@ data BytecodeInstruction hole
     | Return
     | Push (BytecodeValue hole)
     | Pop (Maybe Register)
+    | Save (BytecodeValue hole)
+    | Restore Register
     | PrintF String [BytecodeValue hole]
-    | Throw Int
+    | Throw C.ReturnStatus
+    | StaticAlloc Word64 Word64
     | CodeLabel hole
 
 instance Show hole => Show (BytecodeInstruction hole) where
@@ -72,7 +75,7 @@ instance Show hole => Show (BytecodeInstruction hole) where
     show (Move res e) = "mov " ++ show res ++ ", " ++ show e
     show (Write val addr size) = "wr " ++ show size ++ " " ++ show val ++ ", (" ++ show addr ++ ")"
     show (Read res loc size) = show res ++ " <- rd " ++ show size ++ " (" ++ show loc ++ ")"
-    show (MAlloc res size) = show res ++ " = malloc " ++ show size
+    show (MAlloc res size) = show res ++ " = alloc " ++ show size
     show (Free ptr) = "free " ++ show ptr
     show (Branch val label) = "br " ++ show val ++ ", $" ++ show label
     show (Jump label) = "br $" ++ show label
@@ -81,9 +84,12 @@ instance Show hole => Show (BytecodeInstruction hole) where
     show (Push val) = "push " ++ show val
     show (Pop Nothing) = "pop"
     show (Pop (Just reg)) = "pop " ++ show reg
+    show (Save val) = "save " ++ show val
+    show (Restore reg) = "restore " ++ show reg
     show (PrintF fmt []) = "printf(" ++ show fmt ++ ")"
     show (PrintF fmt args) = "printf(" ++ show fmt ++ ", " ++ intercalate ", " (map show args) ++ ")"
     show (Throw err) = "throw " ++ show err
+    show (StaticAlloc base size) = "alloc [" ++ show base ++ "-" ++ show (base + size) ++ "]"
     show (CodeLabel label) = show label ++ ":"
 
 instance Functor BytecodeInstruction where
@@ -99,12 +105,23 @@ instance Functor BytecodeInstruction where
     fmap _ Return = Return
     fmap f (Push val) = Push (fmap f val)
     fmap _ (Pop reg) = Pop reg
+    fmap f (Save val) = Save (fmap f val)
+    fmap _ (Restore reg) = Restore reg
     fmap f (PrintF fmt args) = PrintF fmt (fmap f <$> args)
     fmap _ (Throw err) = Throw err
+    fmap _ (StaticAlloc base size) = StaticAlloc base size
     fmap f (CodeLabel label) = CodeLabel (f label)
 
+data TargetHole
+    = Fun IR.FunctionID
+    | Block IR.Label
+
+instance Show TargetHole where
+    show (Fun fid) = "<fun> " ++ show fid
+    show (Block bid) = "<blk> " ++ show bid
+
 data Bytecode = Bytecode
-    { _instructions :: Array Word64 (BytecodeInstruction Word64)
+    { _instructions :: Array Word64 (Maybe TargetHole, BytecodeInstruction Word64)
     , _bytecodeLength :: Word64
     , _registerCount :: Word64
     }
@@ -121,16 +138,17 @@ instance Show Bytecode where
             labelSize :: Word64
             labelSize = fromIntegral $ length (show (len - 1))
 
-            showI :: (Word64, BytecodeInstruction Word64) -> String
-            showI (index, i) =
-                replicate (fromIntegral labelSize - fromIntegral (length indexString)) ' '
+            showI :: (Word64, (Maybe TargetHole, BytecodeInstruction Word64)) -> String
+            showI (index, (label, i)) =
+                prefix
+                    ++ replicate (4 + fromIntegral labelSize - fromIntegral (length indexString)) ' '
                     ++ indexString ++ " " ++ show i ++ "\n"
                 where
+                    prefix :: String
+                    prefix = case label of
+                               Nothing -> ""
+                               Just l -> show l ++ ":\n"
                     indexString = show index
-
-data TargetHole
-    = Fun IR.FunctionID
-    | Block IR.Label
 
 type Generator a = State GeneratorState a
 
@@ -141,6 +159,7 @@ data GeneratorState = GeneratorState
     , _funcNameMap :: M.HashMap IR.FunctionID Word64
     , _blockLabelMap :: M.HashMap IR.Label Word64
     , _maxRegisters :: Word64
+    , _staticAllocation :: Word64
     }
 
 makeLenses ''GeneratorState
@@ -154,10 +173,11 @@ generateBytecode compState =
             , _funcNameMap = M.empty
             , _blockLabelMap = M.empty
             , _maxRegisters = 0
+            , _staticAllocation = 0
             }
         generate = do
             createPhiMap fns
-            createInstructionList fns
+            createInstructionList
             eraseLabels
         (emitted, gState) = runState generate initState
         instructionCount = fromIntegral (length emitted)
@@ -179,11 +199,37 @@ generateBytecode compState =
                         modify (phiRemaps %~ M.insert lab (target, val))
                 scanInstruction _ = pure ()
 
-        createInstructionList :: [C.Function] -> Generator ()
-        createInstructionList = mapM_ remapFunction
+        createInstructionList :: Generator ()
+        createInstructionList = do
+            staticMap <- M.fromList <$> mapM generateStaticAllocation (compState ^. IR.globals)
+            mapM_ (generateFunction staticMap) fns
 
-        remapFunction :: C.Function -> Generator ()
-        remapFunction fn = do
+        generateStaticAllocation :: IR.GlobalBlock Variable -> Generator (String, BytecodeValue TargetHole)
+        generateStaticAllocation global = do
+            staticBlockPtr <- gets (^. staticAllocation)
+
+            let totalSize = IR.sizeof (IR.Structure (map IR.datatype (global ^. IR.blockData)))
+            pushI (Just (StaticAlloc staticBlockPtr totalSize))
+
+            forM_ (global ^. IR.blockData) $ \val -> do
+                valuePtr <- gets (^. staticAllocation)
+                let size = IR.sizeof (IR.datatype val)
+                case globalVal val of
+                  Just v -> pushI (Just (Write v (Immediate (IR.Int64 (fromIntegral valuePtr))) size))
+                  Nothing -> pushI (Just (Throw StaticAllocationDependence))
+                modify (staticAllocation %~ (+size))
+
+            pure (global ^. IR.globalName, Immediate (IR.Int64 (fromIntegral staticBlockPtr)))
+            where
+                globalVal :: C.Value -> Maybe (BytecodeValue TargetHole)
+                globalVal (IR.ValImmediate imm) = Just (Immediate imm)
+                globalVal (IR.ValVariable _ v) = Nothing
+                globalVal (IR.ValGlobal global) = Nothing
+                globalVal (IR.ValFunction _ name) = Just (CodeLocation (Fun name))
+                globalVal (IR.ValSizeOf dt) = Just (Immediate (IR.Int64 (IR.sizeof dt)))
+
+        generateFunction :: M.HashMap String (BytecodeValue TargetHole) -> C.Function -> Generator ()
+        generateFunction staticMap fn = do
             let (flowGraph, nodeIDMap) = IR.buildFlowGraph fn
                 (_, liveVars) = IR.findLiveVarsDAG flowGraph
                 clashGraph = IR.buildClashGraph liveVars
@@ -202,11 +248,13 @@ generateBytecode compState =
                 let nodeID = nodeIDMap M.! (blk ^. IR.label)
                     lvaBB = (^. IR.node) <$> M.lookup nodeID (liveVars ^. IR.nodes)
                 case lvaBB of
-                  Just (IR.BlockNode lvaBlock) -> remapBlock registerAllocation lvaBlock blk
+                  Just (IR.BlockNode lvaBlock) -> generateBlock staticMap registerAllocation lvaBlock blk
                   _ -> pure ()
 
-        remapBlock :: M.HashMap Variable Word64 -> IR.LVABasicBlock Variable -> C.BasicBlock -> Generator ()
-        remapBlock allocator lvaBlk blk = do
+        generateBlock :: M.HashMap String (BytecodeValue TargetHole) -> M.HashMap Variable Word64
+                      -> IR.LVABasicBlock Variable -> C.BasicBlock
+                      -> Generator ()
+        generateBlock staticMap allocator lvaBlk blk = do
             pushI (pure (CodeLabel (Block (blk ^. IR.label))))
 
             sequence_ $ Seq.zipWith emit (lvaBlk ^. IR.lvaVars) (blk ^. IR.iList)
@@ -215,7 +263,7 @@ generateBytecode compState =
             case M.lookup (blk ^. IR.label) phiMap of
               Nothing -> pure ()
               Just (target, val) -> do
-                  pushI (Move <$> remapVar target <*> remapV val)
+                  pushI (Move <$> generateVar target <*> generateVal val)
                   swapWithJump
             where
                 swapWithJump :: Generator ()
@@ -233,21 +281,21 @@ generateBytecode compState =
 
                 emit :: S.HashSet Variable -> C.Instruction -> Generator ()
                 emit _ (IR.Binop op res e1 e2) =
-                    pushI (Binop op <$> remapVar res <*> remapV e1 <*> remapV e2)
+                    pushI (Binop op <$> generateVar res <*> generateVal e1 <*> generateVal e2)
                 emit _ (IR.Move res e) =
-                    pushI (Move <$> remapVar res <*> remapV e)
+                    pushI (Move <$> generateVar res <*> generateVal e)
                 emit _ (IR.Write val addr dt) =
-                    pushI (Write <$> remapV val <*> remapV addr <*> pure (IR.sizeof dt))
+                    pushI (Write <$> generateVal val <*> generateVal addr <*> pure (IR.sizeof dt))
                 emit _ (IR.Read res loc dt) = do
-                    let readReg = remapVar res
-                    pushI (Read <$> readReg <*> remapV loc <*> pure (IR.sizeof dt))
+                    let readReg = generateVar res
+                    pushI (Read <$> readReg <*> generateVal loc <*> pure (IR.sizeof dt))
                     transform <- gets (M.lookup res . (^. readTransforms))
                     case (transform, readReg) of
                       (Just trans, Just reg) -> trans reg
                       _ -> pure ()
                 emit _ inst@(IR.GetElementPtr res addr path) = do
                     offsetVal <- offset
-                    pushI (Binop IR.Add <$> remapVar res <*> remapV addr <*> pure offsetVal)
+                    pushI (Binop IR.Add <$> generateVar res <*> generateVal addr <*> pure offsetVal)
                     where
                         offset :: Generator (BytecodeValue TargetHole)
                         offset = do
@@ -260,57 +308,61 @@ generateBytecode compState =
                                 modify (readTransforms %~ M.insert res extractBit)
                             pure (Immediate (IR.Int64 byteOffset))
                 emit _ (IR.BitCast res e _) =
-                    pushI (Move <$> remapVar res <*> remapV e)
+                    pushI (Move <$> generateVar res <*> generateVal e)
                 emit _ (IR.MAlloc res size) =
-                    pushI (MAlloc <$> remapVar res <*> remapV size)
+                    pushI (MAlloc <$> generateVar res <*> generateVal size)
                 emit _ (IR.Free ptr) =
-                    pushI (Free <$> remapV ptr)
+                    pushI (Free <$> generateVal ptr)
                 emit lvs (IR.Call res func args) = do
                     let pushOrder = S.toList lvs
 
-                    mapM_ pushVar pushOrder
+                    mapM_ saveVar pushOrder
                     mapM_ pushVal args
-                    pushI (Call <$> remapV func)
-                    mapM_ popVar (reverse pushOrder)
+                    pushI (Call <$> generateVal func)
+                    mapM_ restoreVar (reverse pushOrder)
                     case res of
                       Nothing -> pure ()
-                      Just r -> pushI (Move <$> remapVar r <*> pure (Register ReturnReg))
+                      Just r -> pushI (Move <$> generateVar r <*> pure (Register ReturnReg))
                     where
                         pushVal :: C.Value -> Generator ()
-                        pushVal v = pushI (Push <$> remapV v)
+                        pushVal v = pushI (Push <$> generateVal v)
 
-                        pushVar :: Variable -> Generator ()
-                        pushVar v = pushI (Push . Register <$> remapVar v)
+                        saveVar :: Variable -> Generator ()
+                        saveVar v = pushI (Save . Register <$> generateVar v)
 
-                        popVar :: Variable -> Generator ()
-                        popVar v = pushI (Just (Pop (remapVar v)))
+                        restoreVar :: Variable -> Generator ()
+                        restoreVar v = pushI (Restore <$> generateVar v)
                 emit _ (IR.Branch val label) =
-                    pushI (Branch <$> remapV val <*> pure (Block label))
+                    pushI (Branch <$> generateVal val <*> pure (Block label))
                 emit _ (IR.Jump label) =
                     pushI (pure (Jump (Block label)))
-                emit _ (IR.Phi res ps) = pure () -- Phi (remapVar res) (fmap remapPhi ps)
+                emit _ (IR.Phi res ps) = pure () -- Phi (generateVar res) (fmap generatePhi ps)
                 emit _ (IR.Return Nothing) = pushI (pure Return)
                 emit _ (IR.Return (Just val)) = do
-                    pushI (Move ReturnReg <$> remapV val)
+                    pushI (Move ReturnReg <$> generateVal val)
                     pushI (pure Return)
+                emit _ (IR.Push val) = pushI (Push <$> generateVal val)
+                emit _ (IR.Pop _ res) = pushI (Just (Pop (generateVar res)))
                 emit _ (IR.PrintF fmt args) = do
-                    pushI (PrintF fmt <$> mapM remapV args)
+                    pushI (PrintF fmt <$> mapM generateVal args)
                 emit _ (IR.Throw err) = pushI (pure (Throw err))
+                emit _ (IR.Comment {}) = pure ()
 
-                remapV :: C.Value -> Maybe (BytecodeValue TargetHole)
-                remapV (IR.ValImmediate imm) = Just (Immediate imm)
-                remapV (IR.ValVariable _ v) = Register <$> remapVar v
-                remapV (IR.ValFunction _ name) = Just (CodeLocation (Fun name))
-                remapV (IR.ValSizeOf dt) = Just (Immediate (IR.Int64 (IR.sizeof dt)))
+                generateVal :: C.Value -> Maybe (BytecodeValue TargetHole)
+                generateVal (IR.ValImmediate imm) = Just (Immediate imm)
+                generateVal (IR.ValVariable _ v) = Register <$> generateVar v
+                generateVal (IR.ValGlobal global) = M.lookup (global ^. IR.globalName) staticMap
+                generateVal (IR.ValFunction _ name) = Just (CodeLocation (Fun name))
+                generateVal (IR.ValSizeOf dt) = Just (Immediate (IR.Int64 (IR.sizeof dt)))
 
-                remapVar :: C.Variable -> Maybe Register
-                remapVar var = Reg <$> M.lookup var allocator
+                generateVar :: C.Variable -> Maybe Register
+                generateVar var = Reg <$> M.lookup var allocator
 
         pushI :: Maybe (BytecodeInstruction TargetHole) -> Generator ()
         pushI Nothing = pure ()
         pushI (Just i) = modify (is %~ (:|> i))
 
-eraseLabels :: Generator [BytecodeInstruction Word64]
+eraseLabels :: Generator [(Maybe TargetHole, BytecodeInstruction Word64)]
 eraseLabels = do
     labelled <- gets (^. is)
     withoutLabels <- findLabels 0 labelled
@@ -319,17 +371,22 @@ eraseLabels = do
     let remapTarget :: TargetHole -> Word64
         remapTarget (Fun fn) = fMap M.! fn
         remapTarget (Block blk) = lMap M.! blk
-    pure (fmap (fmap remapTarget) withoutLabels)
+    pure (fmap (fmap (fmap remapTarget)) withoutLabels)
     where
         findLabels :: Word64 -> Seq.Seq (BytecodeInstruction TargetHole)
-                   -> Generator [BytecodeInstruction TargetHole]
+                   -> Generator [(Maybe TargetHole, BytecodeInstruction TargetHole)]
         findLabels _ Seq.Empty = pure []
         findLabels count ((CodeLabel lab) :<| rest) = do
             case lab of
               Fun fn -> modify (funcNameMap %~ M.insert fn count)
               Block blk -> modify (blockLabelMap %~ M.insert blk count)
-            findLabels count rest
-        findLabels count (i :<| rest) = (i:) <$> findLabels (count + 1) rest
+            updateHeadLabel lab <$> findLabels count rest
+        findLabels count (i :<| rest) = ((Nothing, i):) <$> findLabels (count + 1) rest
+
+        updateHeadLabel :: TargetHole -> [(Maybe TargetHole, BytecodeInstruction TargetHole)]
+                        -> [(Maybe TargetHole, BytecodeInstruction TargetHole)]
+        updateHeadLabel _ [] = []
+        updateHeadLabel l ((_, i):is) = (Just l, i) : is
 
 testEverything3 :: String -> Bytecode
 testEverything3 = generateBytecode . testCompile

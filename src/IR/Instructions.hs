@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DeriveGeneric, GeneralizedNewtypeDeriving, TemplateHaskell, ScopedTypeVariables #-}
 module IR.Instructions where
 
 import IR.DataType
@@ -6,6 +6,9 @@ import IR.DataType
 import Data.List (intercalate)
 import Data.Word
 import Data.Hashable (Hashable)
+
+import Control.Lens
+
 import GHC.Generics (Generic)
 
 newtype FunctionID = FID String
@@ -41,31 +44,44 @@ instance Show Immediate where
 data Value r
     = ValImmediate Immediate
     | ValVariable DataType r
+    | ValGlobal (GlobalBlock r)
     | ValFunction DataType FunctionID
     | ValSizeOf DataType
 
 instance Show r => Show (Value r) where
     show (ValImmediate i) = show i
     show (ValVariable dt r) = show dt ++ " " ++ show r
+    show (ValGlobal block) = _globalName block
     show (ValFunction _ fn) = "&" ++ show fn
     show (ValSizeOf dt) = "sizeof(" ++ show dt ++ ")"
 
 instance DataTypeContainer (Value r) where
-    datatype (ValImmediate (Int64 _)) = FirstOrder Int64T
-    datatype (ValImmediate (Real64 _)) = FirstOrder Real64T
-    datatype (ValImmediate (Int1 _)) = FirstOrder Int1T
+    datatype (ValImmediate (Int64 _)) = I64
+    datatype (ValImmediate (Real64 _)) = R64
+    datatype (ValImmediate (Int1 _)) = I1
     datatype (ValImmediate Unit) = FirstOrder UnitT
-    datatype (ValImmediate Undef) = FirstOrder Void
+    datatype (ValImmediate Undef) = Void
+    datatype (ValGlobal block) = Pointer (Structure (map datatype (_blockData block)))
     datatype (ValVariable t _) = t
     datatype (ValFunction t _) = t
-    datatype (ValSizeOf _) = FirstOrder Int64T
+    datatype (ValSizeOf _) = I64
+
+data GlobalBlock r = GlobalBlock
+    { _globalName :: String
+    , _blockData :: [Value r]
+    }
+
+makeLenses ''GlobalBlock
+
+instance Show r => Show (GlobalBlock r) where
+    show global = global ^. globalName ++ " = global {" ++ intercalate ", " (map show (global ^. blockData)) ++ "}\n"
 
 newtype PhiNode r = PhiNode (Value r, Label)
 
 instance Show r => Show (PhiNode r) where
     show (PhiNode (val, label)) = show val ++ " : " ++ show label
 
-data Instruction r
+data Instruction r e
     = Binop BinaryOperator r (Value r) (Value r)
     | Move r (Value r)
     | Write (Value r) (Value r) DataType
@@ -79,10 +95,13 @@ data Instruction r
     | Jump Label
     | Phi r [PhiNode r]
     | Return (Maybe (Value r))
+    | Push (Value r)
+    | Pop DataType r
     | PrintF String [Value r]
-    | Throw Int
+    | Throw e
+    | Comment String
 
-instance Show r => Show (Instruction r) where
+instance (Show r, Show e) => Show (Instruction r e) where
     show (Binop op res e1 e2) = show res ++ " = " ++ show op ++ " " ++ show e1 ++ ", " ++ show e2
     show (Move res e) = "mov " ++ show res ++ ", " ++ show e
     show (Write val addr dt) = "wr " ++ show val ++ ", " ++ show dt ++ " (" ++ show addr ++ ")"
@@ -101,9 +120,12 @@ instance Show r => Show (Instruction r) where
     show (Phi res ps) = show res ++ " = phi [" ++ intercalate ", " (map show ps) ++ "]"
     show (Return Nothing) = "ret"
     show (Return (Just val)) = "ret " ++ show val
+    show (Push val) = "push " ++ show val
+    show (Pop dt res) = show res ++ " <- pop " ++ show dt
     show (PrintF fmt []) = "call printf(" ++ show fmt ++ ")"
     show (PrintF fmt args) = "call printf(" ++ show fmt ++ ", " ++ intercalate ", " (map show args) ++ ")"
     show (Throw err) = "throw " ++ show err
+    show (Comment comment) = "; " ++ comment
 
 data BinaryOperator
     = Add

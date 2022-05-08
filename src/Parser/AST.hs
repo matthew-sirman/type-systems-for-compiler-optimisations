@@ -19,8 +19,6 @@ module Parser.AST
     , Identifier(..)
     ) where
 
-import qualified Util.BoundedPoset as B
-
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 
@@ -214,6 +212,18 @@ instance Functor Literal where
     fmap _ (RealLiteral r) = RealLiteral r
     fmap f (ListLiteral ls) = ListLiteral (fmap f ls)
     fmap f (TupleLiteral ts) = TupleLiteral (fmap f ts)
+
+instance Foldable Literal where
+    foldr _ e (IntLiteral _) = e
+    foldr _ e (RealLiteral _) = e
+    foldr f e (ListLiteral ls) = foldr f e ls
+    foldr f e (TupleLiteral ts) = foldr f e ts
+
+instance Traversable Literal where
+    traverse _ (IntLiteral i) = pure (IntLiteral i)
+    traverse _ (RealLiteral i) = pure (RealLiteral i)
+    traverse f (ListLiteral ls) = ListLiteral <$> traverse f ls
+    traverse f (TupleLiteral ts) = TupleLiteral <$> traverse f ts
 
 --------------------------------------
 --        TypeExpr Instances        --

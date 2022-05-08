@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, FlexibleInstances, DeriveGeneric, MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell, FlexibleInstances, DeriveGeneric, MultiParamTypeClasses, PatternSynonyms, UndecidableInstances #-}
 module Typing.Types where
 --    ( TypeError(..)
 --    , VarSet
@@ -61,16 +61,18 @@ module Typing.Types where
 import Parser.AST
 
 import qualified Util.Stream as Stream
-import qualified Util.BoundedPoset as P
+import qualified Util.ConstrainedPoset as P
 import Error.Error (showContext)
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import qualified Data.DisjointSet as DS
 import qualified Data.DisjointMap as DM
-import Data.List (intercalate)
+import Data.List (intercalate, intersperse)
 import qualified Data.List.NonEmpty as NE
 import Data.Bifunctor (bimap, first, second)
+import Data.Fix
+import Data.Functor.Classes (Show1(..))
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -108,7 +110,7 @@ type TypeVar = Integer
 type MultiplicityVar = Integer
 type TypeVarMap = M.HashMap TypeVar Identifier
 
-type MultiplicityPoset = P.BoundedPoset MultiplicityAtom Multiplicity
+type MultiplicityPoset = P.ConstrainedPoset MultiplicityAtom Multiplicity
 
 data Type
     = Poly TypeVar
@@ -172,48 +174,145 @@ instance Show Arrow where
     show (Arrow (MAtom Linear)) = "-o"
     show (Arrow m) = "-> " ++ show m
 
+data PrimitiveLiteral
+    = IntLit Int
+    | RealLit Double
+
+instance Show PrimitiveLiteral where
+    show (IntLit i) = show i
+    show (RealLit r) = show r
+
 class TypeContainer a where
     typeof :: a -> Type
 
-data TypedExpr
-    = Let Type [TypedLetBinding] TypedExpr
-    | Case Type Multiplicity TypedExpr (NE.NonEmpty TypedCaseBranch)
-    | Application Type TypedExpr TypedExpr
-    | Lambda Type Multiplicity Pattern TypedExpr
-    | Variable Type Identifier
-    | Literal Type (Literal TypedExpr)
+instance TypeContainer (f (Fix f)) => TypeContainer (Fix f) where
+    typeof (Fix t) = typeof t
 
-instance Show TypedExpr where
-    show (Let _ binds body) = "let " ++ intercalate " and " (map show binds) ++ " in " ++ show body
-    show (Case _ mul disc branches) = "case " ++ show mul ++ " " ++ show disc ++ " of " ++ intercalate "; " (map show (NE.toList branches))
-    show (Application _ fun arg) = "(" ++ show fun ++ " " ++ show arg ++ ")"
-    show (Lambda t mul pat body) = "\\" ++ show pat ++ " -> " ++ show mul ++ " " ++ show body
-    show (Variable _ name) = show name
-    show (Literal _ lit) = show lit
+data TypedExprF t
+    = Let_ Type [TypedLetBindingF t] t
+    | Case_ Type Multiplicity t  (NE.NonEmpty (TypedCaseBranchF t))
+    | Application_ Type t t
+    | Lambda_ Type Multiplicity Pattern t
+    | Variable_ Type Identifier
+    | Tuple_ Type [t]
+    | Literal_ Type PrimitiveLiteral
+
+type TypedExpr = Fix TypedExprF
+
+pattern Let t binds body = Fix (Let_ t binds body)
+pattern Case t mul disc branches = Fix (Case_ t mul disc branches)
+pattern Application t fun arg = Fix (Application_ t fun arg)
+pattern Lambda t mul pat body = Fix (Lambda_ t mul pat body)
+pattern Variable t name = Fix (Variable_ t name)
+pattern Tuple t es = Fix (Tuple_ t es)
+pattern Literal t lit = Fix (Literal_ t lit)
+
+instance Show t => Show (TypedExprF t) where
+    show (Let_ _ binds body) = "let " ++ intercalate " and " (map show binds) ++ " in " ++ show body
+    show (Case_ _ mul disc branches) = "case " ++ show mul ++ " " ++ show disc ++ " of " ++ intercalate "; " (map show (NE.toList branches))
+    show (Application_ _ fun arg) = "(" ++ show fun ++ " " ++ show arg ++ ")"
+    show (Lambda_ _ mul pat body) = "\\" ++ show pat ++ " -> " ++ show mul ++ " " ++ show body
+    show (Variable_ _ name) = show name
+    show (Tuple_ _ es) = "(" ++ intercalate ", " (map show es) ++ ")"
+    show (Literal_ _ lit) = show lit
+
+instance Show1 TypedExprF where
+    liftShowsPrec sp sl d (Let_ _ binds body) =
+        showString "let " . foldl (.) id (intersperse (showString " and ") (map (liftShowsPrec sp sl d) binds))
+        . showString " in " . sp d body -- foldl (.) id (intersperse (showString " and ") (map (fmap (sp d)) binds))
+    liftShowsPrec sp sl d (Case_ _ mul disc branches) =
+        showString "case " . showString (show mul) . showString " " . sp d disc . showString " of "
+        . foldl (.) id (intersperse (showString "; ") (map (liftShowsPrec sp sl d) (NE.toList branches)))
+    liftShowsPrec sp _ d (Application_ _ fun arg) = showParen True (sp d fun . sp d arg)
+    liftShowsPrec sp _ d (Lambda_ _ mul pat body) =
+        showString "\\" . showString (show pat) . showString " -> " . showString (show mul) . sp d body
+    liftShowsPrec _ _ _ (Variable_ _ name) = showString (show name)
+    liftShowsPrec sp sl d (Tuple_ _ ts) =
+        showString "(" . foldl (.) id (intersperse (showString ", ") (map (sp d) ts))
+    liftShowsPrec _ _ _ (Literal_ _ lit) = showString (show lit)
     
-instance TypeContainer TypedExpr where
-    typeof (Let t _ _) = t
-    typeof (Case t _ _ _) = t
-    typeof (Application t _ _) = t
-    typeof (Lambda t _ _ _) = t
-    typeof (Variable t _) = t
-    typeof (Literal t _) = t
 
-data TypedLetBinding = TypedLetBinding Multiplicity Pattern TypedExpr
+instance TypeContainer t => TypeContainer (TypedExprF t) where
+    typeof (Let_ t _ _) = t
+    typeof (Case_ t _ _ _) = t
+    typeof (Application_ t _ _) = t
+    typeof (Lambda_ t _ _ _) = t
+    typeof (Variable_ t _) = t
+    typeof (Tuple_ t _) = t
+    typeof (Literal_ t _) = t
 
-instance Show TypedLetBinding where
+instance Functor TypedExprF where
+    fmap f (Let_ t binds body) = Let_ t (map (fmap f) binds) (f body)
+    fmap f (Case_ t mul disc branches) = Case_ t mul (f disc) (NE.map (fmap f) branches)
+    fmap f (Application_ t fun arg) = Application_ t (f fun) (f arg)
+    fmap f (Lambda_ t mul pat body) = Lambda_ t mul pat (f body)
+    fmap _ (Variable_ t name) = Variable_ t name
+    fmap f (Tuple_ t es) = Tuple_ t (fmap f es)
+    fmap _ (Literal_ t lit) = Literal_ t lit
+
+instance Foldable TypedExprF where
+    foldr f e (Let_ _ binds body) = foldl (foldr f) (f body e) binds
+    foldr f e (Case_ _ _ disc branches) = f disc (foldl (foldr f) e branches)
+    foldr f e (Application_ _ fun arg) = f fun (f arg e)
+    foldr f e (Lambda_ _ _ _ body) = f body e
+    foldr _ e (Variable_ _ _) = e
+    foldr f e (Tuple_ _ es) = foldr f e es
+    foldr _ e (Literal_ _ _) = e
+
+instance Traversable TypedExprF where
+    traverse f (Let_ t binds body) = Let_ t <$> traverse (traverse f) binds <*> f body
+    traverse f (Case_ t mul disc branches) = Case_ t mul <$> f disc <*> traverse (traverse f) branches
+    traverse f (Application_ t fun arg) = Application_ t <$> f fun <*> f arg
+    traverse f (Lambda_ t mul pat body) = Lambda_ t mul pat <$> f body
+    traverse _ (Variable_ t name) = pure (Variable_ t name)
+    traverse f (Tuple_ t es) = Tuple_ t <$> traverse f es
+    traverse _ (Literal_ t lit) = pure (Literal_ t lit)
+
+data TypedLetBindingF t = TypedLetBinding Multiplicity Pattern t
+
+type TypedLetBinding = TypedLetBindingF TypedExpr
+
+instance Show t => Show (TypedLetBindingF t) where
     show (TypedLetBinding mul pat body) = show mul ++ " " ++ show pat ++ " = " ++ show body
 
-instance TypeContainer TypedLetBinding where
+instance Show1 TypedLetBindingF where
+    liftShowsPrec sp _ d (TypedLetBinding mul pat body) =
+        showString (show mul) . showString " " . showString (show pat) . showString " = " . sp d body
+
+instance TypeContainer t => TypeContainer (TypedLetBindingF t) where
     typeof (TypedLetBinding _ _ e) = typeof e
 
-data TypedCaseBranch = TypedCaseBranch Pattern TypedExpr
+instance Functor TypedLetBindingF where
+    fmap f (TypedLetBinding mul pat body) = TypedLetBinding mul pat (f body)
 
-instance Show TypedCaseBranch where
+instance Foldable TypedLetBindingF where
+    foldr f e (TypedLetBinding _ _ body) = f body e
+
+instance Traversable TypedLetBindingF where
+    traverse f (TypedLetBinding mul pat body) = TypedLetBinding mul pat <$> f body
+
+data TypedCaseBranchF t = TypedCaseBranch Pattern t
+
+type TypedCaseBranch = TypedCaseBranchF TypedExpr
+
+instance Show t => Show (TypedCaseBranchF t) where
     show (TypedCaseBranch pat body) = show pat ++ " -> " ++ show body
 
-instance TypeContainer TypedCaseBranch where
+instance Show1 TypedCaseBranchF where
+    liftShowsPrec sp _ d (TypedCaseBranch pat body) =
+        showString (show pat) . showString " -> " . sp d body
+
+instance TypeContainer t => TypeContainer (TypedCaseBranchF t) where
     typeof (TypedCaseBranch _ e) = typeof e
+
+instance Functor TypedCaseBranchF where
+    fmap f (TypedCaseBranch pat body) = TypedCaseBranch pat (f body)
+
+instance Foldable TypedCaseBranchF where
+    foldr f e (TypedCaseBranch _ body) = f body e
+
+instance Traversable TypedCaseBranchF where
+    traverse f (TypedCaseBranch pat body) = TypedCaseBranch pat <$> f body
 
 data Pattern
     = VariablePattern Type Identifier
@@ -401,9 +500,9 @@ popVarFrame = do
 intType, realType, unitType, boolType, listTypeCon :: Type
 intType = Ground (I "Int")
 realType = Ground (I "Real")
-unitType = Ground (I "Unit")
+unitType = Ground (I "()")
 boolType = Ground (I "Bool")
-listTypeCon = Ground (I "List")
+listTypeCon = Ground (I "[]")
 
 type TypeBuilder a = State ( (Integer, M.HashMap Identifier Integer)
                            , (Integer, M.HashMap Identifier Integer)

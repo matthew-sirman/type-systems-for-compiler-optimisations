@@ -4,8 +4,10 @@ module Interpreter.Interpreter where
 import IR.Instructions (BinaryOperator(..), Immediate(..))
 
 import Compiler.Bytecode
+import Compiler.Compiler (ReturnStatus(..))
 
 import Control.Monad.State
+import Control.Monad.Reader
 import Control.Monad.Except
 import Control.Lens
 
@@ -20,34 +22,42 @@ import Text.Printf
 import Debug.Trace
 
 data ProgramStats = ProgramStats
-    { _instructionsExecuted :: Int
-    , _readsExecuted :: Int
-    , _writesExecuted :: Int
+    { _staticMemoryAllocation :: Word64
+    , _dynamicMemoryAllocation :: Word64
+    , _instructionsExecuted :: Word64
+    , _readsExecuted :: Word64
+    , _writesExecuted :: Word64
     }
 
 makeLenses ''ProgramStats
 
 instance Show ProgramStats where
     show stats =
+        "Static memory allocated: " ++ show (stats ^. staticMemoryAllocation) ++ "\n" ++
+        "Dynamic memory allocated: " ++ show (stats ^. dynamicMemoryAllocation) ++ "\n" ++
         "Instructions executed: " ++ show (stats ^. instructionsExecuted) ++ "\n" ++
         "Reads executed: " ++ show (stats ^. readsExecuted) ++ "\n" ++
         "Writes executed: " ++ show (stats ^. writesExecuted) ++ "\n"
 
 stats :: ProgramStats
 stats = ProgramStats
-    { _instructionsExecuted = 0
+    { _staticMemoryAllocation = 0
+    , _dynamicMemoryAllocation = 0
+    , _instructionsExecuted = 0
     , _readsExecuted = 0
     , _writesExecuted = 0
     }
 
 data InterpreterState = InterpreterState
     { _heap :: IOArray Word64 Word8
-    , _allocated :: Word64 
+    , _nextHeapCell :: Word64 
     , _programCounter :: Word64
-    , _callStack :: [Word64]
+    , _returnStack :: [Word64]
     , _stack :: [Word64]
+    , _saveStack :: [Word64]
     , _returnVal :: Word64
     , _registerFile :: IOArray Word64 Word64
+
     , _programStats :: ProgramStats
     }
 
@@ -63,11 +73,11 @@ data InterpreterSettings = ISettings
 makeLenses ''InterpreterSettings
 
 defaultSettings, debugMode :: InterpreterSettings
-defaultSettings = ISettings 65536 False False False
-debugMode = ISettings 65536 True False True
-strongDebugMode = ISettings 65536 True True True
+defaultSettings = ISettings 1048576 False False False
+debugMode = ISettings 1048576 True False True
+strongDebugMode = ISettings 1048576 True True True
 
-type Interpreter a = ExceptT Int (StateT InterpreterState IO) a
+type Interpreter a = ExceptT ReturnStatus (ReaderT InterpreterSettings (StateT InterpreterState IO)) a
 
 interpret :: InterpreterSettings -> Bytecode -> IO ()
 interpret settings bytecode = do
@@ -82,33 +92,35 @@ interpret settings bytecode = do
     regFileArray <- newArray (0, bytecode ^. registerCount - 1) 0
     let initialState = InterpreterState 
             { _heap = heapArray 
-            , _allocated = 0
+            , _nextHeapCell = 0
             , _programCounter = 0
-            , _callStack = []
+            , _returnStack = []
             , _stack = []
+            , _saveStack = []
             , _returnVal = 0
             , _registerFile = regFileArray
             , _programStats = stats
             }
-    (programResult, endState) <- runStateT (runExceptT (forever (fetch >>= step))) initialState
+    (programResult, endState) <- runStateT (runReaderT (runExceptT (forever (fetch >>= step))) settings) initialState
     case programResult of
-      Left 0 -> do
+      Left Success -> do
           putStrLn ""
-          when (settings ^. debug) $ do
-              putStrLn $ "Total memory use: " ++ show (endState ^. allocated)
-              print (endState ^. programStats)
+          when (settings ^. debug) $ print (endState ^. programStats)
           --     putStrLn ""
           --     putStrLn "Result:"
           -- print (endState ^. returnVal)
-      Left (-1) -> putStrLn "Ran out of heap memory!"
-      Left code -> putStrLn $ "Exception thrown (" ++ show code ++ ")."
+      Left code -> putStrLn $ "Exception thrown: " ++ show code
+      Right _ -> putStrLn "The impossible happened: the program exited without a status."
 
     where
         fetch :: Interpreter (BytecodeInstruction Word64)
         fetch = do
             pc <- gets (^. programCounter)
-            let instruction = (bytecode ^. instructions) ! pc
+            let (label, instruction) = (bytecode ^. instructions) ! pc
             when (settings ^. showExecInstruction) $ do
+                case label of
+                  Nothing -> pure ()
+                  Just l -> liftIO $ print l
                 liftIO $ putStrLn $ show pc ++ " " ++ show instruction
             modify (programCounter %~ (+1))
             modify (programStats . instructionsExecuted %~ (+1))
@@ -136,8 +148,12 @@ step (Read res loc size) = do
     modify (programStats . readsExecuted %~ (+1))
 step (MAlloc res size) = do
     allocSize <- fromIntegral <$> loadVal size
-    pointer <- gets (^. allocated)
-    modify (allocated %~ (+allocSize))
+    pointer <- gets (^. nextHeapCell)
+    totalHeapSpace <- asks (^. heapSize)
+    when (totalHeapSpace < pointer + allocSize) $ throwError HeapAllocationFailure
+
+    modify (nextHeapCell %~ (+allocSize))
+    modify (programStats . dynamicMemoryAllocation %~ (+allocSize))
     storeVal res (fromIntegral pointer)
 step (Free ptr) = do
     pure ()
@@ -151,16 +167,16 @@ step (Jump label) = do
 step (Call target) = do
     targetVal <- loadVal target
     pc <- gets (^. programCounter)
-    modify ( (callStack %~ (pc:))
+    modify ( (returnStack %~ (pc:))
            . (programCounter .~ targetVal)
            )
 step Return = do
-    cstack <- gets (^. callStack)
+    cstack <- gets (^. returnStack)
     case cstack of
       (rAddr:rest) -> modify ( (programCounter .~ rAddr)
-                             . (callStack .~ rest)
+                             . (returnStack .~ rest)
                              )
-      [] -> throwError 0
+      [] -> throwError Success
 step (Push val) = do
     pushVal <- loadVal val
     modify (stack %~ (pushVal:))
@@ -172,7 +188,17 @@ step (Pop reg) = do
           case reg of
             Just r -> storeVal r top
             Nothing -> pure ()
-      [] -> throwError 3
+      [] -> throwError EmptyArgStack
+step (Save val) = do
+    pushVal <- loadVal val
+    modify (saveStack %~ (pushVal:))
+step (Restore reg) = do
+    sstack <- gets (^. saveStack)
+    case sstack of
+      (top:rest) -> do
+          modify (saveStack .~ rest)
+          storeVal reg top
+      [] -> throwError EmptySaveStack
 step (PrintF fmt args) = do
     argVals <- mapM loadVal args
     let printStr = mkString (printf fmt) argVals
@@ -182,6 +208,13 @@ step (PrintF fmt args) = do
         mkString base [] = base
         mkString base (x:xs) = mkString (base x) xs
 step (Throw err) = throwError err
+step (StaticAlloc base size) = do
+    heapPtr <- gets (^. nextHeapCell)
+    totalHeapSpace <- asks (^. heapSize)
+    when (base < heapPtr || totalHeapSpace < base + size) $ throwError StaticAllocationFailure
+
+    modify (nextHeapCell .~ base + size)
+    modify (programStats . staticMemoryAllocation %~ (+size))
 step (CodeLabel _) = pure ()
 
 stepBin :: BinaryOperator -> Register -> Word64 -> Word64 -> Interpreter ()
@@ -233,6 +266,7 @@ loadVal (Immediate imm) = readImm imm
         readImm (Int1 True) = pure 1
         readImm (Int1 False) = pure 0
         readImm Unit = undefined
+        readImm _ = undefined
 loadVal (Register (Reg reg)) = do
     rf <- gets (^. registerFile)
     liftIO $ readArray rf reg

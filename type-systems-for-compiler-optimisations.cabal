@@ -28,7 +28,6 @@ library
       Builtin.Builtin
       Builtin.Codegen
       Builtin.Types
-      Compiler.ADT
       Compiler.Bytecode
       Compiler.Compiler
       Compiler.RegisterAllocator
@@ -51,7 +50,7 @@ library
       Typing.Checker
       Typing.Judgement
       Typing.Types
-      Util.BoundedPoset
+      Util.ConstrainedPoset
       Util.Stream
   other-modules:
       Paths_type_systems_for_compiler_optimisations
@@ -63,6 +62,7 @@ library
     , binary
     , bytestring
     , containers
+    , data-fix
     , disjoint-containers
     , hashable
     , lens

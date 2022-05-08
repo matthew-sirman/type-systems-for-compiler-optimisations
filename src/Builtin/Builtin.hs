@@ -78,7 +78,7 @@ funcDiv          = (I "/#", makeScheme "Int# -o Int# -o Int#")
 funcUndefined    = (I "undefined", makeScheme "a")
 
 consUnit, consTrue, consFalse, consListNil, consListCons, consMkInt, consMkReal :: BuiltinConstructor
-consUnit = (I "Unit", makeConsScheme "()")
+consUnit = (I "()", makeConsScheme "()")
 consTrue = (I "True", makeConsScheme "Bool")
 consFalse = (I "False", makeConsScheme "Bool")
 consListNil = (I "[]", makeConsScheme "[a]")
@@ -87,9 +87,9 @@ consMkInt = (I "MkInt#", makeConsScheme "Int# -o Int")
 consMkReal = (I "MkReal#", makeConsScheme "Real# -o Real")
 
 typeUnit, typeBool, typeListCons, typeInt, typeReal :: BuiltinType
-typeUnit = (I "Unit", collectTypeVars [consUnit])
+typeUnit = (I "()", collectTypeVars [consUnit])
 typeBool = (I "Bool", collectTypeVars [consFalse, consTrue])
-typeListCons = (I "List", collectTypeVars [consListNil, consListCons])
+typeListCons = (I "[]", collectTypeVars [consListNil, consListCons])
 typeInt = (I "Int", collectTypeVars [consMkInt])
 typeReal = (I "Real", collectTypeVars [consMkReal])
 

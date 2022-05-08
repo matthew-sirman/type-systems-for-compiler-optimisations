@@ -18,7 +18,7 @@ import Typing.Types
 import qualified Builtin.Types as B
 
 import qualified Util.Stream as Stream
-import qualified Util.BoundedPoset as P
+import qualified Util.ConstrainedPoset as P
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -31,26 +31,30 @@ import Data.Maybe (isJust, fromMaybe)
 
 import Debug.Trace
 
-extendGeneralise, extendNormal :: Context -> [(Multiplicity, Loc SourcePattern, Type)]
+extendGeneralise :: Context -> [(Multiplicity, Loc SourcePattern, Type)]
+                 -> Checker (Context, [Pattern])
+extendGeneralise ctx patTriples =
+    extend True ctx (map (\(m, p, t) -> (m, p, TypeScheme S.empty S.empty t)) patTriples)
+
+extendNormal :: Context -> [(Multiplicity, Loc SourcePattern, TypeScheme)]
                                -> Checker (Context, [Pattern])
-extendGeneralise = extend True
 extendNormal = extend False
 
-extend :: Bool -> Context -> [(Multiplicity, Loc SourcePattern, Type)] -> Checker (Context, [Pattern])
+extend :: Bool -> Context -> [(Multiplicity, Loc SourcePattern, TypeScheme)] -> Checker (Context, [Pattern])
 extend _ ctx [] = pure (ctx, [])
 extend generaliseTypes context (patTriple:patTriples) = do
     (ctx', pat) <- extend' context patTriple
     ((pat:) <$>) <$> extend generaliseTypes ctx' patTriples
     where
-        extend' :: Context -> (Multiplicity, Loc SourcePattern, Type) -> Checker (Context, Pattern)
+        extend' :: Context -> (Multiplicity, Loc SourcePattern, TypeScheme) -> Checker (Context, Pattern)
         extend' ctx (mul, L loc (VarPattern name), t) = do
             termVar <- createTermFor (L loc name)
 
             poset <- gets (^. mulRelation)
             when (P.maybeLeq mul Affine poset) $ modify (varFrame . affineVars %~ S.insert termVar)
             when (P.maybeLeq mul Relevant poset) $ modify (varFrame . relevantVars %~ S.insert termVar)
-            gen <- generalise ctx t mul
-            pure ((termContext %~ M.insert name gen) ctx, VariablePattern (fst gen ^. baseType) name)
+            gen <- generaliseType ctx t
+            pure ((termContext %~ M.insert name (gen, mul)) ctx, VariablePattern (gen ^. baseType) name)
         extend' ctx (mul, L loc (ConsPattern name patterns), t) = do
             conss <- asks (^. dataConstructors)
             case M.lookup name conss of
@@ -62,71 +66,49 @@ extend generaliseTypes context (patTriple:patTriples) = do
                 checkPatterns :: Context -> Type -> [Loc SourcePattern] -> Checker (Context, [Pattern])
                 checkPatterns _ (FunctionType {}) [] = typeError $ IncompletePattern loc name
                 checkPatterns ctx retTy [] = do
-                    unify loc t retTy
+                    unify loc (t ^. baseType) retTy
                     pure (ctx, [])
                 checkPatterns ctx' (FunctionType from (Arrow argMul) to) (sp:sps) = do
                     (ctx'', ps)  <- checkPatterns ctx' to sps
-                    ((:ps) <$>) <$> extend' ctx'' (mul @* argMul, sp, from)
+                    ((:ps) <$>) <$> extend' ctx'' (mul @* argMul, sp, (baseType .~ from) t)
                 checkPatterns ctx' t _ = do
                     typeError $ TooManyArguments loc name
         extend' ctx (mul, L loc (LitPattern literal), t) =
             (LiteralPattern <$>) <$> extendLiteral ctx mul loc literal t
 
-        extendLiteral :: Context -> Multiplicity -> SourceLocation -> Literal (Loc SourcePattern) -> Type -> Checker (Context, Literal Pattern)
+        extendLiteral :: Context -> Multiplicity -> SourceLocation -> Literal (Loc SourcePattern) -> TypeScheme
+                      -> Checker (Context, Literal Pattern)
         extendLiteral ctx _ loc (IntLiteral i) t = do
-            unify loc t intType
+            unify loc (t ^. baseType) intType
             pure (ctx, IntLiteral i)
         extendLiteral ctx _ loc (RealLiteral r) t = do
-            unify loc t realType
+            unify loc (t ^. baseType) realType
             pure (ctx, RealLiteral r)
         extendLiteral ctx mul loc (ListLiteral ts) t = do
             listType <- freshPolyType
-            unify loc t (TypeApp listTypeCon listType)
+            unify loc (t ^. baseType) (TypeApp listTypeCon listType)
             (ListLiteral <$>) <$> foldList listType ctx ts
             where
                 foldList :: Type -> Context -> [Loc SourcePattern] -> Checker (Context, [Pattern])
                 foldList _ elemCtx [] = pure (elemCtx, [])
                 foldList listT elemCtx (p:ps) = do
-                    (ctx', pat) <- extend' elemCtx (mul, p, listT)
+                    (ctx', pat) <- extend' elemCtx (mul, p, (baseType .~ listT) t)
                     ((pat:) <$>) <$> foldList listT ctx' ps
         extendLiteral ctx mul loc (TupleLiteral ts) t = do
             typeToFreshMap <- mapM (\t -> (,) t <$> freshPolyType) ts
-            unify loc t (TupleType (map snd typeToFreshMap))
+            unify loc (t ^. baseType) (TupleType (map snd typeToFreshMap))
             (TupleLiteral <$>) <$> foldTuple ctx typeToFreshMap
             where
                 foldTuple :: Context -> [(Loc SourcePattern, Type)] -> Checker (Context, [Pattern])
                 foldTuple elemCtx [] = pure (elemCtx, [])
                 foldTuple elemCtx ((pattern, elemType):ps) = do
-                    (ctx', pat) <- extend' elemCtx (mul, pattern, elemType)
+                    (ctx', pat) <- extend' elemCtx (mul, pattern, (baseType .~ elemType) t)
                     ((pat:) <$>) <$> foldTuple ctx' ps
 
-        generalise :: Context -> Type -> Multiplicity -> Checker (TypeScheme, Multiplicity)
-        generalise ctx t mul
-            | generaliseTypes = do
-                tRep <- typeRepresentative t
-                mulRel <- gets (^. mulRelation)
-                let freeTVars = S.difference (ftv tRep) (ftv ctx)
-                    freeMVars = S.filter ((`P.unlimited` mulRel) . MPoly) $ S.difference (fuv tRep) (fuv ctx)
-
-                freshTVarMap <- M.fromList <$> mapM createTVarMapping (S.toList freeTVars)
-                freshMVarMap <- M.fromList <$> mapM createMVarMapping (S.toList freeMVars)
-
-                let newBase = substitute (M.map Poly freshTVarMap) (M.map MPoly freshMVarMap) tRep
-
-                pure (TypeScheme (S.fromList (M.elems freshTVarMap)) (S.fromList (M.elems freshMVarMap)) newBase, mul)
-            | otherwise = pure (TypeScheme S.empty S.empty t, mul)
-            where
-                createTVarMapping :: TypeVar -> Checker (TypeVar, TypeVar)
-                createTVarMapping v = do
-                    v' <- freshTVar
-                    -- modify (typeEquivalences %~ DS.union (Poly v) (Poly v'))
-                    pure (v, v')
-
-                createMVarMapping :: MultiplicityVar -> Checker (TypeVar, MultiplicityVar)
-                createMVarMapping m = do
-                    m' <- freshTVar
-                    -- modify (mulEquivalences %~ DS.union (MPoly m) (MPoly m'))
-                    pure (m, m')
+        generaliseType :: Context -> TypeScheme -> Checker TypeScheme
+        generaliseType ctx t
+            | generaliseTypes = generalise ctx (t ^. baseType)
+            | otherwise = pure t
 
 checkRelevant :: Checker ()
 checkRelevant = do
@@ -242,6 +224,30 @@ instantiate scheme = do
 
     pure $ substitute freshTVarMap freshMVarMap (scheme ^. baseType)
 
+generalise :: Context -> Type -> Checker TypeScheme
+generalise ctx t = do
+    tRep <- typeRepresentative t
+    mulRel <- gets (^. mulRelation)
+    let freeTVars = S.difference (ftv tRep) (ftv ctx)
+        freeMVars = S.filter ((`P.unlimited` mulRel) . MPoly) $ S.difference (fuv tRep) (fuv ctx)
+
+    freshTVarMap <- M.fromList <$> mapM createTVarMapping (S.toList freeTVars)
+    freshMVarMap <- M.fromList <$> mapM createMVarMapping (S.toList freeMVars)
+
+    let newBase = substitute (M.map Poly freshTVarMap) (M.map MPoly freshMVarMap) tRep
+
+    pure (TypeScheme (S.fromList (M.elems freshTVarMap)) (S.fromList (M.elems freshMVarMap)) newBase)
+    where
+        createTVarMapping :: TypeVar -> Checker (TypeVar, TypeVar)
+        createTVarMapping v = do
+            v' <- freshTVar
+            pure (v, v')
+
+        createMVarMapping :: MultiplicityVar -> Checker (TypeVar, MultiplicityVar)
+        createMVarMapping m = do
+            m' <- freshTVar
+            pure (m, m')
+
 substitute :: M.HashMap TypeVar Type -> M.HashMap MultiplicityVar Multiplicity -> Type -> Type
 substitute tVarMap mVarMap = sub
     where
@@ -283,9 +289,9 @@ freshPolyMul = MPoly <$> freshMVar
 
 -- TODO: Add scoped type variables
 
-annotationToType :: Annotated a -> Checker Type
-annotationToType (Annotated _ Nothing) = freshPolyType
-annotationToType (Annotated _ (Just t)) = createTypeFor t
+annotationToType :: Context -> Annotated a -> Checker TypeScheme
+annotationToType ctx (Annotated _ Nothing) = TypeScheme S.empty S.empty <$> freshPolyType
+annotationToType ctx (Annotated _ (Just t)) = createTypeFor t >>= generalise ctx
 
 annotationToMultiplicity :: Maybe (Loc MultiplicityExpr) -> Checker Multiplicity
 annotationToMultiplicity Nothing = pure (MAtom Normal) -- freshPolyMul
@@ -436,7 +442,7 @@ findMulRep m = do
 checkTypeEntails :: Context -> Type -> Maybe (Loc TypeExpr) -> Checker ()
 checkTypeEntails _ _ Nothing = pure ()
 checkTypeEntails ctx inferredType (Just ann) = do
-    itr <- findTypeRep (traceShowId inferredType)
+    itr <- findTypeRep inferredType
     evalStateT (entails itr ann) M.empty
     where
         ctxFtvs :: S.HashSet TypeVar
