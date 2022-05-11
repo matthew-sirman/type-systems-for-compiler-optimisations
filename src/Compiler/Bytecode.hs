@@ -56,7 +56,7 @@ data BytecodeInstruction hole
     | Write (BytecodeValue hole) (BytecodeValue hole) Word64
     | Read Register (BytecodeValue hole) Word64
     | MAlloc Register (BytecodeValue hole)
-    | Free (BytecodeValue hole)
+    | Free (BytecodeValue hole) Word64
     | Branch (BytecodeValue hole) hole
     | Jump hole
     | Call (BytecodeValue hole)
@@ -73,10 +73,10 @@ data BytecodeInstruction hole
 instance Show hole => Show (BytecodeInstruction hole) where
     show (Binop op res e1 e2) = show res ++ " = " ++ show op ++ " " ++ show e1 ++ ", " ++ show e2
     show (Move res e) = "mov " ++ show res ++ ", " ++ show e
-    show (Write val addr size) = "wr " ++ show size ++ " " ++ show val ++ ", (" ++ show addr ++ ")"
-    show (Read res loc size) = show res ++ " <- rd " ++ show size ++ " (" ++ show loc ++ ")"
-    show (MAlloc res size) = show res ++ " = alloc " ++ show size
-    show (Free ptr) = "free " ++ show ptr
+    show (Write val addr size) = "wr [" ++ show size ++ "] " ++ show val ++ ", (" ++ show addr ++ ")"
+    show (Read res loc size) = show res ++ " <- rd [" ++ show size ++ "] (" ++ show loc ++ ")"
+    show (MAlloc res size) = show res ++ " = malloc " ++ show size
+    show (Free ptr size) = "free [" ++ show size ++ "] " ++ show ptr
     show (Branch val label) = "br " ++ show val ++ ", $" ++ show label
     show (Jump label) = "br $" ++ show label
     show (Call addr) = "call " ++ show addr
@@ -98,7 +98,7 @@ instance Functor BytecodeInstruction where
     fmap f (Write val addr size) = Write (fmap f val) (fmap f addr) size
     fmap f (Read res loc size) = Read res (fmap f loc) size
     fmap f (MAlloc res size) = MAlloc res (fmap f size)
-    fmap f (Free ptr) = Free (fmap f ptr)
+    fmap f (Free ptr size) = Free (fmap f ptr) size
     fmap f (Branch val label) = Branch (fmap f val) (f label)
     fmap f (Jump label) = Jump (f label)
     fmap f (Call addr) = Call (fmap f addr)
@@ -312,7 +312,8 @@ generateBytecode compState =
                 emit _ (IR.MAlloc res size) =
                     pushI (MAlloc <$> generateVar res <*> generateVal size)
                 emit _ (IR.Free ptr) =
-                    pushI (Free <$> generateVal ptr)
+                    let IR.Pointer baseType = IR.datatype ptr
+                     in pushI (Free <$> generateVal ptr <*> pure (IR.sizeof baseType))
                 emit lvs (IR.Call res func args) = do
                     let pushOrder = S.toList lvs
 

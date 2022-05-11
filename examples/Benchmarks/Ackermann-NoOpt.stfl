@@ -1,0 +1,17 @@
+(+) : Int -o Int -o Int;;
+(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+
+(-) : Int -o Int -o Int;;
+(MkInt# x) - (MkInt# y) = MkInt# (x -# y);;
+
+ack_n : Int -> Int -> Int;;
+ack_n m n = case m of
+    0 -> n + 1;
+    m ->
+        case n of
+            0 -> ack_n (m - 1) 1;
+            n -> ack_n (m - 1) (ack_n m (n - 1));;
+
+main : Int;;
+main = ack_n 3 2;;
+

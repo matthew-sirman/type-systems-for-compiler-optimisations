@@ -24,6 +24,8 @@ import Debug.Trace
 data ProgramStats = ProgramStats
     { _staticMemoryAllocation :: Word64
     , _dynamicMemoryAllocation :: Word64
+    , _reclaimedMemory :: Word64
+    , _maximumMemory :: Word64
     , _instructionsExecuted :: Word64
     , _readsExecuted :: Word64
     , _writesExecuted :: Word64
@@ -35,14 +37,30 @@ instance Show ProgramStats where
     show stats =
         "Static memory allocated: " ++ show (stats ^. staticMemoryAllocation) ++ "\n" ++
         "Dynamic memory allocated: " ++ show (stats ^. dynamicMemoryAllocation) ++ "\n" ++
+        "Memory deallocated: " ++ show (stats ^. reclaimedMemory) ++ "\n" ++
+        "Maximum dynamic memory held: " ++ show (stats ^. maximumMemory) ++ "\n" ++
         "Instructions executed: " ++ show (stats ^. instructionsExecuted) ++ "\n" ++
         "Reads executed: " ++ show (stats ^. readsExecuted) ++ "\n" ++
         "Writes executed: " ++ show (stats ^. writesExecuted) ++ "\n"
+
+showStatsCsv :: ProgramStats -> String
+showStatsCsv stats = show (stats ^. staticMemoryAllocation) ++ ", " ++
+                     show (stats ^. dynamicMemoryAllocation) ++ ", " ++
+                     show (stats ^. reclaimedMemory) ++ ", " ++
+                     show (stats ^. maximumMemory) ++ ", " ++
+                     show (stats ^. instructionsExecuted) ++ ", " ++
+                     show (stats ^. readsExecuted) ++ ", " ++
+                     show (stats ^. writesExecuted)
+
+updateMaxMemory :: ProgramStats -> ProgramStats
+updateMaxMemory stats = (maximumMemory %~ max (stats ^. dynamicMemoryAllocation - stats ^. reclaimedMemory)) stats
 
 stats :: ProgramStats
 stats = ProgramStats
     { _staticMemoryAllocation = 0
     , _dynamicMemoryAllocation = 0
+    , _reclaimedMemory = 0
+    , _maximumMemory = 0
     , _instructionsExecuted = 0
     , _readsExecuted = 0
     , _writesExecuted = 0
@@ -68,20 +86,21 @@ data InterpreterSettings = ISettings
     , _debug :: Bool
     , _showExecInstruction :: Bool
     , _showBytecode :: Bool
+    , _outputCsv :: Bool
     }
 
 makeLenses ''InterpreterSettings
 
 defaultSettings, debugMode :: InterpreterSettings
-defaultSettings = ISettings 1048576 False False False
-debugMode = ISettings 1048576 True False True
-strongDebugMode = ISettings 1048576 True True True
+defaultSettings = ISettings 1048576 False False False False
+debugMode = ISettings 1048576 True False True False
+strongDebugMode = ISettings 1048576 True True True False
 
 type Interpreter a = ExceptT ReturnStatus (ReaderT InterpreterSettings (StateT InterpreterState IO)) a
 
 interpret :: InterpreterSettings -> Bytecode -> IO ()
 interpret settings bytecode = do
-    when (settings ^. debug) $ do
+    when (settings ^. debug && not (settings ^. outputCsv)) $ do
         putStrLn $ "Heap size: " ++ show (settings ^. heapSize)
         putStrLn $ "Registers: " ++ show (bytecode ^. registerCount)
         putStrLn ""
@@ -104,8 +123,10 @@ interpret settings bytecode = do
     (programResult, endState) <- runStateT (runReaderT (runExceptT (forever (fetch >>= step))) settings) initialState
     case programResult of
       Left Success -> do
-          putStrLn ""
-          when (settings ^. debug) $ print (endState ^. programStats)
+          when (settings ^. debug && not (settings ^. outputCsv)) $ do
+              putStrLn ""
+              print (endState ^. programStats)
+          when (settings ^. outputCsv) $ putStrLn (showStatsCsv (endState ^. programStats))
           --     putStrLn ""
           --     putStrLn "Result:"
           -- print (endState ^. returnVal)
@@ -154,9 +175,13 @@ step (MAlloc res size) = do
 
     modify (nextHeapCell %~ (+allocSize))
     modify (programStats . dynamicMemoryAllocation %~ (+allocSize))
+    modify (programStats %~ updateMaxMemory)
     storeVal res (fromIntegral pointer)
-step (Free ptr) = do
-    pure ()
+step (Free ptr size) = do
+    base <- loadVal ptr
+    heapArray <- gets (^. heap)
+    forM_ [base..base + size - 1] $ \addr -> liftIO $ writeArray heapArray addr 255
+    modify (programStats . reclaimedMemory %~ (+size))
 step (Branch val label) = do
     cond <- loadVal val
     if cond == 0
@@ -200,9 +225,10 @@ step (Restore reg) = do
           storeVal reg top
       [] -> throwError EmptySaveStack
 step (PrintF fmt args) = do
+    settings <- ask
     argVals <- mapM loadVal args
     let printStr = mkString (printf fmt) argVals
-    liftIO $ putStr printStr
+    unless (settings ^. outputCsv) $ liftIO $ putStr printStr
     where
         mkString :: (PrintfArg a, PrintfType r) => (forall r'. PrintfType r' => r') -> [a] -> r
         mkString base [] = base

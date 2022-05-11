@@ -1,0 +1,21 @@
+(+) : Int -o Int -o Int;;
+(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+
+map : (a -o b) -> [a] -o [b];;
+map f xs =
+    case !xs of
+        [] -> [];
+        (x::xs) -> f x :: map f xs;;
+
+foldr : (a -o b -o b) -> b -o [a] -o b;;
+foldr f e xs =
+    case !xs of
+        [] -> e;
+        (x::xs) -> f x (foldr f e xs);;
+
+getInt : Int -o Int;;
+getInt x = x;;
+
+main : Int;;
+main = getInt (foldr (\x -o \y -o x + y) 5 (map (\x -o x + 1) (1::2::3::4::5::[])));;
+

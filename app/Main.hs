@@ -5,6 +5,7 @@ import Parser.AST
 import Preprocessor.Preprocessor
 import Typing.Checker
 import Typing.Types
+import Compiler.Translate
 import Compiler.Compiler
 import Compiler.Bytecode
 import Interpreter.Interpreter
@@ -14,9 +15,12 @@ import System.Environment
 import Control.Monad.Except
 
 import Debug.Trace
+import qualified IR.Program as IR
 
 data Options = Options
     { sourceFile :: FilePath
+    , showCore :: Bool
+    , showIR :: Bool
     , interpreterSettings :: InterpreterSettings
     }
 
@@ -24,7 +28,7 @@ type Process a = ExceptT String IO a
 
 settings :: InterpreterSettings
 settings = defaultSettings
-    { _debug = True
+    { _debug = False
     , _showExecInstruction = False
     , _showBytecode = False
     }
@@ -33,7 +37,17 @@ getOptions :: Process Options
 getOptions = do
     args <- liftIO getArgs
     case args of
-      (source:_) -> pure $ Options source settings
+      (source:args) ->
+          let opts = Options
+                         { sourceFile = source
+                         , showCore = "--show-core" `elem` args
+                         , showIR = "--show-ir" `elem` args
+                         , interpreterSettings = settings 
+                             { _outputCsv = "--output-csv" `elem` args
+                             , _debug = "--show-stats" `elem` args
+                             }
+                         }
+           in pure opts
       _ -> do
           throwError "Source file argument required."
 
@@ -59,7 +73,11 @@ runTypeChecker source ctx ve = do
       Left (e, tvm) -> throwError (showError source tvm e)
       Right (t, ps) -> pure (t, ps)
 
-compileProgram :: StaticContext -> MultiplicityPoset -> TypedExpr -> Process Program
+convertToCore :: StaticContext -> MultiplicityPoset -> TypedExpr -> Process CodegenExpr
+convertToCore staticContext ps expr =
+    pure (convertAST staticContext ps expr)
+
+compileProgram :: StaticContext -> MultiplicityPoset -> CodegenExpr -> Process Program
 compileProgram staticContext ps expr = do
     pure (compile staticContext ps expr)
 
@@ -77,8 +95,10 @@ pipeline = do
     source <- readSourceFile opt
     (expr, ctx) <- preprocess source
     (typedExpr, ps) <- runTypeChecker source ctx expr
-    program <- compileProgram ctx ps typedExpr
-    liftIO $ print program
+    core <- convertToCore ctx ps typedExpr
+    when (showCore opt) $ liftIO $ print core
+    program <- compileProgram ctx ps core
+    when (showIR opt) $ liftIO $ print program
     bytecode <- generate program
     executeBytecode opt bytecode
 

@@ -1,0 +1,27 @@
+(+) : Int -o Int -o Int;;
+(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+
+(-) : Int -o Int -o Int;;
+(MkInt# x) - (MkInt# y) = MkInt# (x -# y);;
+
+data IList where
+    | Nil : IList
+    | Cons : Int -o IList -o IList
+    ;;
+
+take : Int ->? IList ->? IList;;
+take n xs =
+    case ?n of
+      0 -> Nil;
+      n -> case ?xs of
+             Nil -> Nil;
+             (Cons x xs) -> Cons x (take (n - 1) xs);;
+
+eContFrac : IList;;
+eContFrac =
+    let aux n = Cons 1 (Cons n (Cons 1 (aux (n + 2))))
+     in Cons 2 (aux 2);;
+
+main : IList;;
+main = take 30 eContFrac;;
+

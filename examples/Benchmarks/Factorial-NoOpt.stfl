@@ -1,0 +1,14 @@
+(-) : Int -o Int -o Int;;
+(MkInt# x) - (MkInt# y) = MkInt# (x -# y);;
+
+(*) : Int -o Int -o Int;;
+(MkInt# x) * (MkInt# y) = MkInt# (x *# y);;
+
+fact_n : Int -> Int;;
+fact_n n = case n of
+    0 -> 1;
+    n -> n * fact_n (n - 1);;
+
+main : Int;;
+main = fact_n 20;;
+
