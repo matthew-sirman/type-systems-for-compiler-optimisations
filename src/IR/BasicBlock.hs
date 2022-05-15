@@ -1,6 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 module IR.BasicBlock where
 
+-- Basic Block data type
+
 import IR.Instructions
 
 import Data.Sequence as Seq

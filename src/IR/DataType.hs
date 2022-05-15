@@ -1,6 +1,8 @@
 {-# LANGUAGE PatternSynonyms #-}
 module IR.DataType where
 
+-- Data structures for STFL-IR datatypes
+
 import Data.List (intercalate)
 import Data.Semigroup
 import qualified Data.HashMap.Strict as M
@@ -27,6 +29,10 @@ instance Show FirstOrder where
     show Real64T = "r64"
     show UnitT = "unit"
     show VoidT = "void"
+
+subtype :: FirstOrder -> FirstOrder -> Bool
+subtype Int1T Int64T = True
+subtype t t' = t == t'
 
 data Struct
     = Struct StructName [TemplateArgName] [DataType] Bool
@@ -127,7 +133,6 @@ isFunctionType _ = False
 ptrSize :: Num a => a
 ptrSize = 8
 
--- i1, i64, r64, void, voidPtr :: DataType
 pattern I1 = FirstOrder Int1T
 pattern I64 = FirstOrder Int64T
 pattern R64 = FirstOrder Real64T

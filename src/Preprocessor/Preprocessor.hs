@@ -1,6 +1,7 @@
 module Preprocessor.Preprocessor where
 
 import Parser.AST
+import Parser.Parser
 import Typing.Types
 import Error.Error (showContext)
 
@@ -9,11 +10,16 @@ import Control.Monad.State
 import Control.Lens
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
+import Data.List (intercalate)
+
+import System.Directory
 
 data PreprocessorError
     = NoMatchingImplementation SourceLocation Identifier
     | TypeAnnotationMismatch SourceLocation TypeExpr TypeExpr
     | MulAnnotationMismatch SourceLocation MultiplicityExpr MultiplicityExpr
+    | ImportNotFound SourceLocation String
+    | ParserError String
 
 showPPError :: String -> PreprocessorError -> String
 showPPError text (NoMatchingImplementation sl name) =
@@ -22,22 +28,45 @@ showPPError text (TypeAnnotationMismatch sl ty ty') =
     showContext text sl ++ "Type annotation conflict between \"" ++ show ty ++ "\" and \"" ++ show ty' ++ "\"."
 showPPError text (MulAnnotationMismatch sl m m') =
     showContext text sl ++ "Multiplicity annotation conflict between \"" ++ show m ++ "\" and \"" ++ show m' ++ "\"."
+showPPError text (ImportNotFound sl path) =
+    showContext text sl ++ "Import file not found \"" ++ path ++ "\"."
+showPPError text (ParserError err) = err
 
-type Preprocessor a = ExceptT PreprocessorError (State StaticContext) a
+type Preprocessor a = StateT (StaticContext, S.HashSet FilePath) (ExceptT PreprocessorError IO) a
 
-transformAST :: [Loc Statement] -> StaticContext -> Either PreprocessorError (Loc ValExpr, StaticContext)
-transformAST stmts ctx = 
-    let (bindingsOrError, ctx') = runState (runExceptT (transform' stmts)) ctx
-     in case bindingsOrError of
-          Left err -> Left err
-          Right bindings ->
-              let xs = map (slEnd . location) bindings
-                  endOfFile = maximum (map (slEnd . location) bindings)
-                  wholeFileLoc = SL 0 endOfFile 1
-               in Right (L wholeFileLoc (VELet bindings (L wholeFileLoc (VEVar (I "main")))), ctx')
+transformAST :: [FilePath] -> [Loc Statement] -> StaticContext -> ExceptT PreprocessorError IO (Loc ValExpr, StaticContext)
+transformAST paths stmts ctx = do
+    (bindings, (ctx', _)) <- runStateT (transform' stmts) (ctx, S.empty)
+    let xs = map (slEnd . location) bindings
+        endOfFile = maximum (map (slEnd . location) bindings)
+        wholeFileLoc = SL 0 endOfFile 1
+    pure (L wholeFileLoc (VELet bindings (L wholeFileLoc (VEVar (I "main")))), ctx')
     where
         transform' :: [Loc Statement] -> Preprocessor [Loc LetBinding]
         transform' [] = pure []
+        transform' ((L loc (Import path)) : rest) = do
+            importedStmts <- tryPaths paths
+            importedBindings <- transform' importedStmts
+            (importedBindings++) <$> transform' rest
+            where
+                tryPaths :: [FilePath] -> Preprocessor [Loc Statement]
+                tryPaths [] = throwError (ImportNotFound loc (intercalate "." (syntax path)))
+                tryPaths (p:ps) = do
+                    let filePath = p ++ concatMap ('/':) (syntax path) ++ ".stfl"
+                    alreadyLoaded <- gets (S.member filePath . (^. _2))
+                    if alreadyLoaded
+                       then pure []
+                       else do
+                           exists <- liftIO $ doesFileExist filePath
+                           if exists
+                              then do
+                                  modify (_2 %~ S.insert filePath)
+                                  source <- liftIO $ readFile filePath
+                                  case parse source of
+                                    Left e -> throwError (ParserError e)
+                                    Right stmts -> pure stmts
+                           else tryPaths ps
+
         transform' (tLoc@(L _ (TypeDecl name t)) : fLoc@(L _ (FuncDecl name' body)) : rest)
             | syntax name == syntax name' = do
                 embellished <- embellishFunction name t body
@@ -94,10 +123,10 @@ transformAST stmts ctx =
             constructors <- forM conss $ \(L _ (Annotated cons (Just consType))) -> do
                 let consName = syntax cons
                     consScheme = typeExprToScheme consType
-                modify (dataConstructors %~ M.insert consName consScheme)
+                modify (_1 . dataConstructors %~ M.insert consName consScheme)
                 pure (consName, consScheme)
             let tvs = S.unions (map ((^. quantifiedTVars) . fst . snd) constructors)
-            modify (dataTypes %~ M.insert (syntax name) (tvs, constructors))
+            modify (_1 . dataTypes %~ M.insert (syntax name) (tvs, constructors))
                 
         -- TODO: Check type definition well-formedness
 

@@ -19,6 +19,7 @@ import qualified IR.Program as IR
 
 data Options = Options
     { sourceFile :: FilePath
+    , libPaths :: [FilePath]
     , showCore :: Bool
     , showIR :: Bool
     , interpreterSettings :: InterpreterSettings
@@ -42,14 +43,24 @@ getOptions = do
                          { sourceFile = source
                          , showCore = "--show-core" `elem` args
                          , showIR = "--show-ir" `elem` args
+                         , libPaths = getLibPaths False args
                          , interpreterSettings = settings 
                              { _outputCsv = "--output-csv" `elem` args
                              , _debug = "--show-stats" `elem` args
+                             , _showExecInstruction = "--show-exec-instruction" `elem` args
                              }
                          }
            in pure opts
       _ -> do
           throwError "Source file argument required."
+    where
+        getLibPaths :: Bool -> [String] -> [FilePath]
+        getLibPaths _ [] = []
+        getLibPaths _ ("--lib-dirs":libs) = getLibPaths True libs
+        getLibPaths _ (option:rest)
+            | take 2 option == "--" = getLibPaths False rest
+        getLibPaths True (path:libs) = path : getLibPaths True libs
+        getLibPaths False (_:rest) = getLibPaths False rest
 
 readSourceFile :: Options -> Process String
 readSourceFile opt = liftIO $ readFile (sourceFile opt)
@@ -60,12 +71,10 @@ parseSource source =
       Left e -> throwError e
       Right stmts -> pure stmts
 
-preprocess :: String -> Process (Loc ValExpr, StaticContext)
-preprocess source = do
+preprocess :: Options -> String -> Process (Loc ValExpr, StaticContext)
+preprocess opts source = do
     stmts <- parseSource source
-    case transformAST stmts defaultBuiltins of
-      Left e -> throwError (showPPError source e)
-      Right expr -> pure expr
+    withExceptT (showPPError source) $ transformAST (libPaths opts) stmts defaultBuiltins
 
 runTypeChecker :: String -> StaticContext -> Loc ValExpr -> Process (TypedExpr, MultiplicityPoset)
 runTypeChecker source ctx ve = do
@@ -93,7 +102,7 @@ pipeline :: Process ()
 pipeline = do
     opt <- getOptions
     source <- readSourceFile opt
-    (expr, ctx) <- preprocess source
+    (expr, ctx) <- preprocess opt source
     (typedExpr, ps) <- runTypeChecker source ctx expr
     core <- convertToCore ctx ps typedExpr
     when (showCore opt) $ liftIO $ print core

@@ -1,0 +1,27 @@
+-----------------------
+-- Functions library --
+-----------------------
+--
+-- Contains common general-purpose functions including
+--  - map
+--  - folds
+--
+
+map : (a -> @p b) -> [a] -> @p [b];;
+map f xs =
+    case @p xs of
+        [] -> [];
+        (x::xs) -> f x :: map f xs;;
+
+foldl : (a -o b -o a) -> b -o [a] -o b;;
+foldl f e xs =
+    case !xs of
+        [] -> e;
+        (x::xs) -> foldl f (f e x) xs;;
+
+foldr : (a -> @p b -> @p b) -> b -> @p [a] -> @p b;;
+foldr f e xs =
+    case @p xs of
+        [] -> e;
+        (x::xs) -> f (foldr f e xs) x;;
+

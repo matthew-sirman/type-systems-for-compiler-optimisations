@@ -1,6 +1,8 @@
 {-# LANGUAGE DeriveGeneric, GeneralizedNewtypeDeriving, TemplateHaskell, ScopedTypeVariables #-}
 module IR.Instructions where
 
+-- Data types for STFL-IR instruction set
+
 import IR.DataType
 
 import Data.List (intercalate)
@@ -132,6 +134,7 @@ data BinaryOperator
     | Sub
     | Mul
     | Div
+    | Mod
     | And
     | Or
     | Shift
@@ -141,12 +144,14 @@ data BinaryOperator
     | GreaterThan
     | LessThanEqual
     | GreaterThanEqual
+    | Compare
 
 instance Show BinaryOperator where
     show Add = "add"
     show Sub = "sub"
     show Mul = "mul"
     show Div = "div"
+    show Mod = "mod"
     show And = "and"
     show Or = "or"
     show Shift = "shift"
@@ -156,4 +161,5 @@ instance Show BinaryOperator where
     show GreaterThan = "gt"
     show LessThanEqual = "le"
     show GreaterThanEqual = "gt"
+    show Compare = "cmp"
 

@@ -1,6 +1,8 @@
 {-# LANGUAGE FunctionalDependencies #-}
 module IR.InstructionBuilder where
 
+-- Helper functions for creating STFL-IR
+
 import IR.Instructions
 import IR.DataType
 
@@ -10,8 +12,6 @@ import Data.Maybe (fromJust)
 import Control.Monad.State
 
 import Debug.Trace
-
--- TODO: Consider trying to remove calls to "error"
 
 class Monad m => MonadIRBuilder r e m | m -> r, m -> e where
     addInstruction :: Instruction r e -> m ()
@@ -30,6 +30,7 @@ binop op getReg lhs rhs = do
         resType Sub = I64
         resType Mul = I64
         resType Div = I64
+        resType Mod = I64
         resType And = I64
         resType Or = I64
         resType Shift = I64
@@ -39,6 +40,7 @@ binop op getReg lhs rhs = do
         resType GreaterThan = I1
         resType LessThanEqual = I1
         resType GreaterThanEqual = I1
+        resType Compare = I64
 
 write :: MonadIRBuilder r e m => Value r -> Value r -> m ()
 write val addr =
@@ -48,9 +50,8 @@ write val addr =
             Pointer addrTy = datatype addr
          in if compatible valTy addrTy
                then addInstruction $ Write val addr valTy
-               else addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) Void -- error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
-               -- else error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
-      _ -> addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) Void -- error $ "COMPILER ERROR: Write value type and address type incompatible. " ++ show valTy ++ ", " ++ show addrTy
+               else addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) Void
+      _ -> addInstruction $ Write (ValImmediate Undef) (ValImmediate Undef) Void
 
 read :: MonadIRBuilder r e m => m r -> Value r -> m (Value r)
 read getReg addr = do
@@ -70,7 +71,7 @@ getElementPtr getReg src path = do
       Pointer struct -> do
           addInstruction $ GetElementPtr reg src path
           pure (ValVariable (Pointer (findType struct path)) reg)
-      ty -> do -- error $ "COMPILER ERROR: getelementptr on non-pointer type. " ++ show ty
+      ty -> do
           addInstruction $ GetElementPtr reg (ValImmediate Undef) path
           pure (ValImmediate Undef)
     where
@@ -118,7 +119,6 @@ makeCall getReg fun args = do
            addInstruction $ Call res fun args
            pure (ValVariable (specialise (M.toList subMap) retType) <$> res)
        else error $ "COMPILER ERROR: Invalid arguments in function call. " ++ show args ++ show argTypes
-       -- else pure (Just (ValImmediate Undef))
     where
         matchArgs :: [DataType] -> [Value r] -> State (M.HashMap TemplateArgName DataType) Bool
         matchArgs [] _ = pure True
@@ -126,7 +126,7 @@ makeCall getReg fun args = do
         matchArgs (dt:dts) (v:vs) = matchArg dt (datatype v) .&&. matchArgs dts vs
             where
                 matchArg :: DataType -> DataType -> State (M.HashMap TemplateArgName DataType) Bool
-                matchArg (FirstOrder fo) (FirstOrder fo') = pure (fo == fo')
+                matchArg (FirstOrder fo) (FirstOrder fo') = pure (subtype fo' fo)
                 matchArg (NamedStruct s args) (NamedStruct s' args') =
                     foldl (.&&.) (pure (s == s')) (zipWith matchArg args args')
                 matchArg (Structure fields) (Structure fields') =

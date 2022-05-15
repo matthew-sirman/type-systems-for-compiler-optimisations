@@ -1,5 +1,5 @@
-(+) : Int -o Int -o Int;;
-(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+import Numeric;;
+import Data.Bool;;
 
 map : (a ->? b) -> [a] ->? [b];;
 map f xs =
@@ -13,9 +13,13 @@ foldr f e xs =
         [] -> e;
         (x::xs) -> f x (foldr f e xs);;
 
-getInt : Int -o Int;;
-getInt x = x;;
+fromTo : Int -> Int -> [Int];;
+fromTo a b =
+    if a < b then
+        a :: fromTo (a + 1) b
+    else
+        [];;
 
 main : Int;;
-main = getInt (foldr (\x ->? \y ->? x + y) 5 (map (\x ->? x + 1) (1::2::3::4::5::[])));;
+main = foldr (\x ->? \y ->? x + y) 5 (map (\x ->? x + 1) (fromTo 1 40));;
 

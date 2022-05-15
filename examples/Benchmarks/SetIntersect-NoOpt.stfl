@@ -1,0 +1,26 @@
+import Data.Set;;
+
+merge : Set -> Set -> Set;;
+merge s1 s2 =
+    case s1 of
+        SLeaf -> s2;
+        (SBranch e1 l1 r1) ->
+            case s2 of
+                SLeaf -> SBranch e1 l1 l1;
+                (SBranch e2 l2 r2) ->
+                    SBranch e1 l1 (SBranch e2 (merge r1 l2) r2);;
+
+intersection : Set -> Set -> Set;;
+intersection s1 s2 =
+    case s1 of
+        SLeaf -> SLeaf;
+        (SBranch e l r) ->
+            if member e s2 then
+                SBranch e (intersection l s2) (intersection r s2)
+            else
+                merge (intersection l s2) (intersection r s2);;
+
+main : Set;;
+main = intersection (fromList (1::3::5::7::9::11::13::15::17::19::21::23::[])) (fromList (2::3::5::7::11::13::17::19::23::[]));;
+                    
+

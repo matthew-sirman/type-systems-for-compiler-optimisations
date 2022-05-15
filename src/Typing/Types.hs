@@ -1,62 +1,7 @@
 {-# LANGUAGE TemplateHaskell, FlexibleInstances, DeriveGeneric, MultiParamTypeClasses, PatternSynonyms, UndecidableInstances #-}
 module Typing.Types where
---    ( TypeError(..)
---    , VarSet
---    , TermVar
---    , TypeVar
---    , MultiplicityVar , TypeVarMap
---    , MultiplicityPoset
---    , Type(..)
---    , Multiplicity(..)
---    , Arrow(..)
---    , TypedExpr(..)
---    , TypedCaseBranch(..)
---    , TypedLetBinding(..)
---    , Pattern(..)
---    , typeof
---
---    , CheckStackFrame(..)
---    , termNameContext
---    , addedTermNames
---    , typeNameContext
---    , mulNameContext
---
---    , CheckVarFrame(..)
---    , affineVars
---    , relevantVars
---    , zeroVars
---
---    , CheckState(..)
---    , stackFrame
---    , varFrame 
---    , freshTermVars
---    , freshTypeVars
---    , typeEquivalences
---    , freshMulVars
---    , mulEquivalences
---    , mulRelation
---    , termVarAssignments
---    , typeVarAssignments
---    , mulVarAssignments
---
---    , pushStackFrame
---    , popStackFrame
---    , pushVarFrame
---    , popVarFrame
---
---    , CheckerState
---    , Checker
---    , TypeScheme(..), quantifiedTVars, quantifiedMVars, baseType
---    , Context(..), termContext
---    , StaticContext(..), defaultFunctions, dataConstructors, dataTypes
---    , Typed(..)
---
---    , emptyContext
---    , emptyCheckState
---
---    , typeError
---    , showError, showType
---    ) where
+
+-- Types used in the type checker modules
 
 import Parser.AST
 
@@ -338,6 +283,7 @@ data CheckVarFrame = CheckVarFrame
     , _relevantVars         :: VarSet
     , _zeroVars             :: VarSet
     }
+    deriving Show
 
 makeLenses ''CheckVarFrame
 

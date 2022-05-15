@@ -9,15 +9,10 @@
 {-# LANGUAGE RecursiveDo #-}
 module Compiler.Compiler where
 
+-- The Compiler mapping functional STFL-Core code into imperative STFL-IR
+
 import qualified Parser.AST as AST (MultiplicityAtom(..), Identifier(..), Literal(..))
 import qualified Typing.Types as T
--- import Typing.Types
---     ( Pattern(..)
---     , Type(..)
---     , Multiplicity(..)
---     , Arrow(..)
---     , typeof
---     )
 import qualified Util.ConstrainedPoset as P
 import qualified Util.Stream as Stream
 
@@ -165,29 +160,10 @@ instance MonadIRBuilder Variable ReturnStatus Compiler where
     addInstruction i = modify (blockStack . ix 0 . IR.iList %~ (:|> i))
     throwUndefined = throw Undefined
 
--- instance MonadTardis NameMap () Compiler where
---     getPast = Compiler getPast
---     getFuture = Compiler getFuture
---     sendPast = Compiler . sendPast
---     sendFuture = Compiler . sendFuture
---     tardis = Compiler . tardis
-
 data BindAlloc
     = Thunk Value Value IR.DataType
     | BoxBind Value
     | ReuseBind (Compiler ())
-
--- thunkFunc :: [IR.DataType] -> IR.DataType
--- thunkFunc args = IR.FunctionT (IR.FirstOrder IR.Void) (thunkArg : args)
--- 
--- thunkArg :: IR.DataType
--- thunkArg = IR.Pointer (IR.Structure [IR.NamedStruct B.thunkTagStruct [], voidPtr])
--- 
--- thunkStruct :: IR.Struct
--- thunkStruct = IR.Struct "thunk" ["T"] [IR.NamedStruct B.thunkTagStruct [], IR.TemplateArg "T"] False
--- 
--- wrapThunk :: IR.DataType -> IR.DataType
--- wrapThunk dt = IR.Pointer (IR.NamedStruct thunkStruct [dt])
 
 thunkStruct :: IR.Struct
 thunkStruct = IR.Struct "thunk" ["T"] [ infoTableType (IR.TemplateArg "T")
@@ -197,8 +173,6 @@ wrapThunk :: IR.DataType -> IR.DataType
 wrapThunk dt = IR.Pointer (IR.NamedStruct thunkStruct [dt])
 
 isThunkType :: IR.DataType -> Bool
--- isThunkType (IR.Pointer (IR.Structure [IR.NamedStruct thunk _, _]))
---     | thunk == B.thunkTagStruct = True
 isThunkType (IR.Pointer (IR.NamedStruct s _)) = s == thunkStruct
 isThunkType (IR.Pointer dt) = isThunkType dt
 isThunkType _ = False
@@ -225,7 +199,6 @@ compile staticContext poset expr =
             createThunkFunctions
             pushFunction "main" IR.Void []
             pushBlock
-            -- programResult <- codegen (traceShowId (convertAST staticContext poset expr))
             programResult <- codegen expr
             printResult programResult
             ret Nothing
@@ -288,23 +261,6 @@ compile staticContext poset expr =
                     buildThunk thunkVar captures
                     let IR.Pointer thunkVarAllocType = IR.datatype thunkVar
                     modify (builtThunks %~ M.insert name (thunkVarAllocType, IR.datatype thunkObject, buildThunk))
-
-                    -- Now create the object
-                    --     buildThunk thunk caps = do
-                    --         fnPtr <- getElementPtr (mkVar Strict) thunk [0]
-                    --         write (bestThunk linearThunk) fnPtr
-                    --         fnPtr <- getElementPtr (mkVar Strict) thunk [1]
-                    --         write (bestThunk relevantThunk) fnPtr
-                    --         fnPtr <- getElementPtr (mkVar Strict) thunk [2]
-                    --         write (bestThunk affineThunk) fnPtr
-                    --         fnPtr <- getElementPtr (mkVar Strict) thunk [3]
-                    --         write (bestThunk normalThunk) fnPtr
-
-                    --         zipWithM_ (writeCapture thunk) caps [captureOffset..]
-                    --         
-                    -- buildThunk thunkVar captures
-                    -- let IR.Pointer thunkVarAllocType = IR.datatype thunkVar
-                    -- modify (builtThunks %~ M.insert name (thunkVarAllocType, IR.datatype thunkObject, buildThunk))
 
                     where
                         genThunk :: String -> [(Bool, TypedVar)] -> CodegenExpr -> Compiler Value
@@ -405,15 +361,6 @@ compile staticContext poset expr =
                     val <- read (mkVar Lazy) addr
                     pure (varID v, val)
 
-                -- makeArgument :: TypedVar -> Compiler ((Variable, IR.DataType), (Integer, Value))
-                -- makeArgument v = do
-                --     let eval = if isBoxed (varType v)
-                --                   then Lazy
-                --                   else Strict
-                --     arg <- mkArg eval
-                --     varDataType <- ttypeToIRData M.empty (varType v)
-                --     pure ((arg, varDataType), (varID (baseVar v), IR.ValVariable varDataType arg))
-
                 lookupCaptureType :: (Bool, Var) -> Compiler IR.DataType
                 lookupCaptureType (strict, v) = do
                     val <- asks (M.lookup (varID v) . (^. nameMap))
@@ -480,12 +427,13 @@ compile staticContext poset expr =
                       Nothing -> or <$> mapM canFail ps
                 canFail (TuplePattern ps) = or <$> mapM canFail ps
 
-        codegen (Application mul fun args) = do
+        codegen (Application resType mul fun args) = do
             funVal <- lookupVar fun
             forM_ args $ \case
                 Var v -> lookupVar v >>= push
                 Lit l -> genLiteral l >>= push
-            forceCompute mul funVal
+            result <- forceCompute mul funVal
+            bitcast (mkVar Strict) result =<< strictIRData M.empty resType
 
         codegen (PrimApp affine fun args) = do
             argVals <- forM args $ \case
@@ -565,62 +513,6 @@ compile staticContext poset expr =
                 entryOffset (True, False) = 1
                 entryOffset (False, True) = 2
                 entryOffset (False, False) = 3
-
-
-        -- forceCompute :: Value -> Compiler Value
-        -- forceCompute addr@(IR.ValVariable dt (Variable Lazy _)) = force addr dt
-        -- forceCompute addr@(IR.ValVariable dt (Argument Lazy _)) = force addr dt
-        -- forceCompute v = pure v
-
-        -- force :: Value -> IR.DataType -> Compiler Value
-        -- force baseAddr dt = do
-        --     -- We start with the entry block stack like:
-        --     --  ... | entry
-        --     -- We add instructions to start the test to see if the value
-        --     -- has been evaluated
-        --     evalTagPtr <- getElementPtr (mkVar Strict) baseAddr [0, 0]
-        --     evalTag <- read (mkVar Strict) evalTagPtr
-        --     evaluated <- binop IR.Equal (mkVar Strict) evalTag (mkInt1 True)
-
-        --     -- Get the payload pointer
-        --     payloadPtr <- getElementPtr (mkVar Strict) baseAddr [1]
-
-        --     -- Next, we push the "force" block:
-        --     --  ... | entry | force
-        --     pushBlock
-
-        --     -- Read the call address out of the closure. This is in the payload location
-        --     callTargetPtr <- bitcast (mkVar Strict) payloadPtr (IR.Pointer (thunkFunc []))
-        --     callTarget <- read (mkVar Strict) callTargetPtr
-        --     -- Call the thunk
-        --     voidCall callTarget [baseAddr]
-
-        --     -- Now, we swap the blocks. This is to avoid the entry block being buried
-        --     -- later on. Then, we push the "rest" block.
-        --     --  ... | force | entry | rest
-        --     swapBlocks
-        --     pushBlock
-        --     
-        --     restLabel <- blockLabel
-
-        --     -- We now read out the result variable from the payload
-        --     payload <- read (mkVar Strict) payloadPtr
-
-        --     -- Now we swap the top two blocks. This is because we wish to pop the entry
-        --     -- then force blocks.
-        --     --  ... | force | rest | entry
-        --     swapBlocks
-
-        --     -- Add the branch instruction to skip over the force block in the case that
-        --     -- the thunk has already been forced
-        --     branch evaluated restLabel
-
-        --     -- Pop, then swap, then pop again to apply the entry then force blocks
-        --     popBlock
-        --     swapBlocks
-        --     popBlock
-
-        --     pure payload
 
         unpackPattern :: Bool -> IR.Label -> Pattern -> Value -> Compiler NameMap
         unpackPattern dealloc failLabel pattern v = do
@@ -806,64 +698,6 @@ compile staticContext poset expr =
             modify (compiledProgram %~ IR.addGlobal infoTable)
             pure (IR.ValGlobal infoTable)
 
-        -- %%%%% --
-        -- %%%%% --
-        -- %%%%% -- FUNCTION CALLING --
-        -- %%%%% --
-        -- %%%%% -- 1. Push args onto stack
-        -- %%%%% -- 2. Functions pop args (later: this will also do PAP)
-        -- %%%%% -- 3. Function calls only take thunk objects (closures)
-        -- %%%%% -- 4. Closures start with code ptrs. These are updated after forcing
-        -- %%%%% -- 5. Can add functions to force thunks and project values -- updated accordingly
-        -- %%%%% -- 6. With subtyping, perform a simple coercion when weaking functions --
-        -- %%%%% --     For function object f = { strict_entry, lazy_entry, fvs ... }
-        -- %%%%% --     create c = { coerce_s, coerce_l, f } object
-        -- %%%%% --     coerce_l simply calls f[1](f)
-        -- %%%%% --     coerce_s forces the rest of the arguments and calls f[0](f)
-        -- %%%%% --
-        -- %%%%% --
-        -- %%%%% -- Also think about reclaim functions -- for non-affine just point to constructor,
-        -- %%%%% -- otherwise "reclaim" memory
-        -- %%%%% --
-        -- %%%%% -- Maybe deal with exponential thunks -- easily fixed with unique naming or something
-        -- %%%%% --
-        -- %%%%% --
-
-        -- ttypeToIRData :: M.HashMap PolyVar IR.DataType -> TranslateType -> Compiler IR.DataType
-        -- ttypeToIRData _ IntT = pure IR.i64
-        -- ttypeToIRData _ RealT = pure IR.r64
-        -- ttypeToIRData pmap (Poly p) =
-        --     case M.lookup p pmap of
-        --       Just t -> pure t
-        --       Nothing -> pure voidPtr
-        -- ttypeToIRData pmap (Tuple ts) = IR.Pointer . IR.Structure <$> mapM (ttypeToIRData pmap) ts
-        -- ttypeToIRData _ (Named (AST.I name)) = do
-        --     val <- gets (M.lookup name . (^. dataTypeInfo))
-        --     case val of
-        --       Just v -> pure (IR.Pointer (IR.NamedStruct (v ^. baseType) []))
-        --       Nothing -> pure voidPtr -- error (show name) TODO: Think about this
-        -- ttypeToIRData pmap (Function ret args) = IR.FunctionT <$> ttypeToIRData pmap ret <*> mapM (ttypeToIRData pmap) args
-        -- ttypeToIRData pmap (TypeApp (AST.I name) args) = do
-        --     val <- gets (M.lookup name . (^. dataTypeInfo))
-        --     argDataTypes <- mapM (ttypeToIRData pmap) args
-        --     case val of
-        --       Just v -> pure (IR.Pointer (IR.NamedStruct (v ^. baseType) argDataTypes))
-        --       Nothing -> error (show name)
-        
-        -- convertStrictData :: TranslateType -> Compiler IR.DataType
-        -- convertStrictData IntT = pure IR.i64
-        -- convertStrictData RealT = pure IR.r64
-        -- convertStrictData Poly = pure voidPtr
-        -- convertStrictData (Tuple ts) = IR.Pointer . IR.Structure <$> mapM ttypeToIRData ts
-        -- convertStrictData (Named name) = do
-        --     val <- gets (M.lookup name . (^. dataConsTypes))
-        --     case val of
-        --       Just v -> pure (IR.Pointer v)
-        --       Nothing -> error (show name)
-        --         -- gets (IR.Pointer . (M.! name) . (^. dataConsTypes))
-        -- convertStrictData (Function ret args) = IR.FunctionT <$> convertStrictData ret <*> mapM ttypeToIRData args
-        -- convertStrictData (MkStrict t) = convertStrictData t
-        
         createDataTypes :: Compiler ()
         createDataTypes = do
             modify (compiledProgram %~ IR.addStruct thunkStruct)
@@ -872,17 +706,6 @@ compile staticContext poset expr =
             mapM_ (\(tn, (tvs, _)) -> forwardDeclType tn tvs) programDataTypes
             structs <- mapM (uncurry createDataType) programDataTypes
             createPrintFunctions structs
-            -- forM_ (M.toList (staticContext ^. T.dataTypes)) $ \(typeId@(AST.I typeName), constructors) ->
-            --     case constructors of
-            --       [cons] -> do
-            --           undefined
-            --       _ -> do
-            --           consTypes <- mapM (createDataConstructor typeName) constructors
-            --           let union = IR.Union ("_type_" ++ typeName) (map fst consTypes)
-            --               unionDataType = IR.NamedStruct union
-            --           modify (compiledProgram %~ IR.addStruct union)
-            --           modify (dataConsTypes %~ M.insert typeId unionDataType)
-            --           zipWithM_ (createConsFunction unionDataType) (zip constructors [0..]) consTypes
         
         forwardDeclType :: AST.Identifier -> S.HashSet T.TypeVar -> Compiler ()
         forwardDeclType (AST.I typeName) tvs = do
@@ -901,7 +724,10 @@ compile staticContext poset expr =
             let union = IR.Union ("_type_" ++ typeName) typeVars []
             modify (compiledProgram %~ IR.addStruct union)
             let info = DataTypeInfo union (listArray (0, -1) []) (IR.ValImmediate IR.Undef) True
+
             modify (dataTypeInfo %~ M.insert typeName info)
+            modify (compiledProgram %~ IR.addStruct union)
+            modify (symbolRefs %~ M.insert (TypeSymbol (IR.structBaseName union)) typeName)
 
             pure union
 
@@ -1142,14 +968,6 @@ compile staticContext poset expr =
                                      -> ReaderT (M.HashMap IR.TemplateArgName Value) Compiler Value
                 getParametricPrinter (IR.TemplateArg arg) = asks (M.! arg)
                 getParametricPrinter _ = pure (IR.ValVariable (IR.FunctionT IR.Void [IR.VoidPtr]) (Variable Strict (-1)))
-                -- printSubValue base dt index = do
-                --     elemPtr <- getElementPtr (mkVar Strict) base [index]
-                --     let elemEval
-                --             | isThunkType (IR.datatype elemPtr) = Lazy
-                --             | otherwise = Strict
-                --     elem <- read (mkVar elemEval) elemPtr
-                --     forcedElem <- forceCompute True elem
-                --     printVal (IR.datatype forcedElem) forcedElem
 
                 intercalatePrintM :: String -> [ReaderT (M.HashMap IR.TemplateArgName Value) Compiler ()]
                                   -> ReaderT (M.HashMap IR.TemplateArgName Value) Compiler ()
@@ -1211,112 +1029,6 @@ compile staticContext poset expr =
                     gets ((M.! typeName) . (^. dataPrintFunctions))
                 getParametricPrinter t = error (show t)
 
-        -- printResult :: Value -> Compiler ()
-        -- printResult result = do
-        --     forced <- forceCompute True result
-        --     printVal (IR.datatype forced) forced
-        --     printf "\n" []
-        --     where
-        --         printVal :: IR.DataType -> Value -> Compiler ()
-        --         printVal (IR.FirstOrder fo) val = printFirstOrder fo val
-        --         printVal (IR.Pointer (IR.NamedStruct named args)) val = printNamed named args val
-        --         printVal (IR.Pointer (IR.Structure ts)) val = do
-        --             printf "(" []
-        --             intercalatePrintM ", " (zipWith (printSubValue val) ts [0..])
-        --             printf ")" []
-        --         printVal (IR.FunctionT ret args) val = do
-        --             printf "fun" []
-        --         printVal (IR.Pointer t) val = do
-        --             printf "ptr" []
-        --         printVal t _ = pure () -- error (show t)
-
-        --         printFirstOrder :: IR.FirstOrder -> Value -> Compiler ()
-        --         printFirstOrder IR.Int1T val = pure ()
-        --         printFirstOrder IR.Int64T val = do
-        --             printf "%d" [val]
-        --         printFirstOrder IR.Real64T val = do
-        --             printf "%f" [val]
-        --         printFirstOrder IR.UnitT val = do
-        --             printf "()" []
-        --         printFirstOrder IR.VoidT val = do
-        --             printf "error" []
-
-        --         printNamed :: IR.Struct -> [IR.DataType] -> Value -> Compiler ()
-        --         printNamed (IR.Struct symbol argNames [] _) argTypes val = do
-        --             name <- gets ((M.! symbol) . (^. symbolRefs))
-        --             printf name []
-        --         printNamed (IR.Struct symbol argNames ts _) argTypes val = do
-        --             name <- gets ((M.! symbol) . (^. symbolRefs))
-        --             printf ("(" ++ name ++ " ") []
-        --             intercalatePrintM " " (zipWith (printSubValue val) (map (IR.specialise (zip argNames argTypes)) ts) [0..])
-        --             printf ")" []
-        --         printNamed (IR.Union _ argNames Nothing ts) argTypes val = do
-        --             printf "untagged-union" []
-        --         printNamed (IR.Union symbol argNames (Just tag) ts) argTypes val = do
-        --             tagPtr <- bitcast (mkVar Strict) val (IR.Pointer IR.I64)
-        --             tag <- read (mkVar Strict) tagPtr
-        --             pushBlock
-        --             restLabel <- blockLabel
-        --             swapBlocks
-        --             name <- gets ((M.! symbol) . (^. symbolRefs))
-        --             typeInfo <- gets ((M.! name) . (^. dataTypeInfo))
-        --             matchTag restLabel tag val (assocs (typeInfo ^. alternatives))
-        --             popBlock
-        --             where
-        --                 matchTag :: IR.Label -> Value -> Value -> [(Int, ConsInfo)] -> Compiler ()
-        --                 matchTag successLabel _ _ [] = jump successLabel
-        --                 matchTag successLabel tagVal dataPtr ((tag, consInfo):ts) = do
-        --                     -- Entry:
-        --                     --  ... | entry
-        --                     -- Push match block:
-        --                     --  ... | entry | match
-        --                     pushBlock
-        --                     matchLabel <- blockLabel
-        --                     -- Swap blocks:
-        --                     --  ... | match | entry
-        --                     swapBlocks
-        --                     cmp <- binop IR.Equal (mkVar Strict) tagVal (mkInt tag)
-        --                     branch cmp matchLabel
-        --                     -- Pop entry:
-        --                     --  ... | match
-        --                     popBlock
-        --                     -- Push other branches:
-        --                     --  ... | match | entry'
-        --                     pushBlock
-        --                     matchTag successLabel tagVal dataPtr ts
-        --                     -- Pop branch return:
-        --                     --  ... | match
-        --                     popBlock
-        --                     -- Display this branch
-        --                     let branchType = IR.Pointer (IR.Structure [IR.I64, IR.specialise (zip argNames argTypes) (consInfo ^. consDataType)])
-        --                     branchPtr <- bitcast (mkVar Strict) dataPtr branchType
-        --                     altPtr <- getElementPtr (mkVar Strict) branchPtr [1]
-        --                     printVal (IR.datatype altPtr) altPtr
-        --                     jump successLabel
-        --         printNamed (IR.Alias _ argNames t) argTypes val = printVal (IR.Pointer (IR.specialise (zip argNames argTypes) t)) val
-        --         printNamed s@(IR.ForwardDecl symbol _) argTypes val = do
-        --             name <- gets ((M.! symbol) . (^. symbolRefs))
-        --             typeInfo <- gets ((M.! name) . (^. dataTypeInfo))
-        --             printNamed (typeInfo ^. baseType) argTypes val
-
-        --         intercalatePrintM :: String -> [Compiler ()] -> Compiler ()
-        --         intercalatePrintM _ [] = pure ()
-        --         intercalatePrintM _ [printer] = printer
-        --         intercalatePrintM sep (printer:printers) = do
-        --             printer
-        --             printf sep []
-        --             intercalatePrintM sep printers
-
-        --         printSubValue :: Value -> IR.DataType -> Int -> Compiler ()
-        --         printSubValue base dt index = do
-        --             elemPtr <- getElementPtr (mkVar Strict) base [index]
-        --             let elemEval
-        --                     | isThunkType (IR.datatype elemPtr) = Lazy
-        --                     | otherwise = Strict
-        --             elem <- read (mkVar elemEval) elemPtr
-        --             forcedElem <- forceCompute True elem
-        --             printVal (IR.datatype forcedElem) forcedElem
-
         evaluation :: Value -> Evaluation
         evaluation (IR.ValVariable _ (Variable eval _)) = eval
         evaluation (IR.ValVariable _ (Argument eval _)) = eval
@@ -1345,22 +1057,4 @@ compile staticContext poset expr =
         startInfo = CompilerInfo
             { _nameMap = M.empty
             }
-
-testEverything2 :: String -> IO ()
-testEverything2 s = case typecheck staticCtx (fromRight (test_parseExpr s)) of
-                     Left (e, tvm) -> putStrLn (T.showError s tvm e)
-                     Right (t, p) -> print (compile staticCtx p (convertAST staticCtx p t)) 
-    where
-        fromRight (Right x) = x
-        fromRight _ = error "Parsing failed"
-
-        staticCtx = Builtin.Builtin.defaultBuiltins
-
-testCompile :: String -> Program
-testCompile s =
-    let (Right parsed) = test_parseExpr s
-        (Right (typed, poset)) = typecheck staticCtx parsed
-     in compile staticCtx poset (convertAST staticCtx poset typed)
-    where
-        staticCtx = Builtin.Builtin.defaultBuiltins
 

@@ -1,6 +1,8 @@
 {-# LANGUAGE TemplateHaskell, DeriveGeneric, TupleSections, PatternSynonyms, RankNTypes #-}
 module Compiler.Translate where
 
+-- Translator mapping STFL (typed) source code into STFL-Core
+
 import qualified Util.ConstrainedPoset as P
 
 import qualified Parser.AST as P
@@ -19,8 +21,6 @@ import Typing.Types
 
 import Builtin.Codegen as B
 
--- import qualified IR.DataType as IR
-
 import qualified Data.List.NonEmpty as NE
 import Data.List (intercalate)
 import Data.Maybe (catMaybes, fromJust, isJust, fromMaybe)
@@ -36,12 +36,6 @@ import Control.Lens hiding (Strict, Lazy)
 
 import GHC.Generics (Generic)
 import Data.Hashable (Hashable(..))
-
--- TODO: Remove
-import Typing.Checker
-import Parser.Parser
-import Debug.Trace
-import qualified Builtin.Builtin
 
 data Evaluation
     = Strict
@@ -178,7 +172,7 @@ pattern LiteralT t lit <- Fix (Tagged (T.Literal_ t lit) _)
 data CodegenExpr
     = Let [Binding] CodegenExpr
     | Case CodegenExpr (NE.NonEmpty Alternative)
-    | Application (Bool, Bool) Var [Atom]
+    | Application TranslateType (Bool, Bool) Var [Atom]
     | PrimApp Bool B.PrimitiveFunction [Atom]
     | ConsApp Bool P.Identifier [Atom]
     | PackedTuple [Atom]
@@ -200,7 +194,7 @@ prettyPrintCodegenExpr (Case disc branches) =
         showBranches = map prettyPrintAlt (NE.toList branches)
         branchLines = concat (mapHT (mapHT ("    { " ++) (indent 6)) (mapHT ("    ; " ++) (indent 6)) showBranches)
      in showDisc ++ branchLines ++ ["    }"]
-prettyPrintCodegenExpr (Application mul fun args) =
+prettyPrintCodegenExpr (Application _ mul fun args) =
     [multiplicityString mul ++ show fun ++ " {" ++ intercalate ", " (map show args) ++ "}"]
 prettyPrintCodegenExpr (PrimApp _ fun args) = [show fun ++ " {" ++ intercalate ", " (map show args) ++ "}"]
 prettyPrintCodegenExpr (ConsApp free fun args) = [show fun ++ " {" ++ intercalate ", " (map show args) ++ "}" ++ if free then " (freeable)" else ""]
@@ -289,10 +283,6 @@ prettyPrintLF :: LambdaForm -> [String]
 prettyPrintLF (Lf update captures args body) =
     let prefix = "{" ++ intercalate ", " (map showCap captures) ++ "} \\" ++ show update ++ " {" ++ intercalate ", " (map showArg args) ++ "} ->"
         lfs = intercalate [indent 4 "/\\"] (map (map (indent 4) . prettyPrintCodegenExpr) (variants body))
-            -- case body of
-            --     LazyOnly expr -> prefix : map (indent 4) (prettyPrintCodegenExpr expr)
-            --     Both strict lazy -> prefix : map (indent 4) (prettyPrintCodegenExpr strict)
-            --                      ++ (indent 4 "/\\" : map (indent 4) (prettyPrintCodegenExpr lazy))
      in prefix : lfs
     where
         showCap :: (Bool, Var) -> String
@@ -354,34 +344,13 @@ findFVs svs (Let bindings body) = do
         allNames :: S.HashSet Var
         allNames = S.fromList (map extractName bindings)
 
-    -- let extractName (LazyBinding _ v _) = S.singleton (baseVar v)
-    --     extractName (BoxBinding _ v _) = S.singleton v
-    --     extractName (Reuse v _ _) = S.singleton v
-    --     -- extractName (EagerBinding _ v _) = S.singleton (baseVar v)
-    --     findBindFVs (LazyBinding _ _ (Lf _ _ binds body)) = do
-    --         local (bound %~ S.union (S.fromList (map (baseVar . snd) binds))) $ do
-    --             case body of
-    --               LazyOnly expr -> findFVs svs expr
-    --               Both strict lazy -> do
-    --                   strictFVs <- findFVs svs strict
-    --                   lazyFVs <- findFVs svs lazy
-    --                   pure (S.union strictFVs lazyFVs)
-    --     findBindFVs (BoxBinding _ _ v) = checkFV svs v
-    --     findBindFVs (Reuse {}) = pure S.empty
-    --     -- findBindFVs (EagerBinding _ _ e) = findFVs e
-    --     allNames = S.unions (map extractName bindings)
-    --  in local (bound %~ S.union allNames) $ do
-    --         bindingFVs <- mapM findBindFVs bindings
-    --         bodyFVs <- findFVs svs body
-    --         pure (S.unions (bodyFVs:bindingFVs))
-
 findFVs svs (Case disc branches) = do
     discFVs <- findFVs svs disc
     let findBranch (Alt _ pat expr) = local (bound %~ S.union (namesInPattern pat)) $ findFVs svs expr
     branchFVs <- NE.toList <$> mapM findBranch branches
     pure (S.unions (discFVs:branchFVs))
 
-findFVs svs (Application _ fun args) = do
+findFVs svs (Application _ _ fun args) = do
     fnFVs <- checkFV svs fun
     argFVs <- mapM (checkAtom svs) args
     pure (S.unions (fnFVs:argFVs))
@@ -496,22 +465,10 @@ convertAST staticContext poset expr =
             }
      in evalState (runReaderT (convert (addTags expr)) initCtx) initState
     where
-        -- finalise :: CodegenExpr -> CodegenExpr
-        -- finalise (Let binds expr) = Let (map finaliseBind binds) (finalise expr)
-        --     where
-        --         finaliseBind :: Binding -> Binding
-        --         finaliseBind (LazyBinding name v (Lf caps args body)) =
-        --             LazyBinding name v (Lf caps args (finalise body))
-        -- finalise (Case disc bs) = Case (finalise disc) (NE.map finaliseAlt bs)
-        --     where
-        --         finaliseAlt :: Alternative -> Alternative
-        --         finaliseAlt (Alt pat body) = Alt pat (finalise body)
-        -- finalise expr = expr
 
         convert :: TaggedTExpr -> Translator CodegenExpr
         convert letExpr@(LetT _ bindings body) = do
             let recursiveVals = findRecursiveValues bindings
-            -- traceShowM (recursiveVals, map (\(T.TypedLetBinding _ pat body) -> (pat, tag body)) bindings)
             rel <- relevantCtx
             (makeBinds, ids) <- createBindings recursiveVals rel bindings
             local (idMap %~ M.union ids) $ do
@@ -534,7 +491,7 @@ convertAST staticContext poset expr =
                                     local (idMap %~ M.filterWithKey (\k _ -> not (k `S.member` addedNameSet))) $ convert expr
                                 pure (Case cvtExpr . NE.singleton . Alt (affine && isAffine mul) p)
                         (restBinds, ids) <- createBindings recs rel binds
-                        pure (addPatternMatch caseExpr restBinds, M.union (M.map (\tv -> ((isRelevant mul, isAffine mul), baseVar tv)) patIds) ids)
+                        pure (addPatternMatch caseExpr restBinds, M.union (M.map (\tv -> ((isVarPattern pat, isAffine mul), baseVar tv)) patIds) ids)
                     -- Lazy patterns which can be directly projected from generate
                     -- non strict thunks and projectors
                     | directProjection pat = do
@@ -565,9 +522,6 @@ convertAST staticContext poset expr =
                                 case lf of
                                   Left (Lf update caps args body) ->
                                       let tupleType = Tuple (map (varType . snd) patList)
-                                          -- TODO: Free parameter is conditionally true -- maybe we need to pass
-                                          -- a monadic continuation into convertLambdas with what to do with the result?
-                                          -- Default -- pure, projection -- lookup if affine to decide to free
                                           matcher = NE.singleton (Alt False p (PackedTuple (map (Var . baseVar . snd) patList)))
                                           extractor = mapBodies (`Case` matcher) body
                                        in pure (LazyBinding name (TV bindVar tupleType) (Lf update caps args extractor))
@@ -582,7 +536,7 @@ convertAST staticContext poset expr =
                         addProjector var (binds, ids) ((nameId@(P.I name), projVar), index) = do
                             affine <- affineCtx
                             let flag
-                                    | affine && isAffine mul = Updatable -- FreeAfterUse
+                                    | affine && isAffine mul = Updatable
                                     | otherwise = Updatable
                                 lf = Lf flag [(False, var)] [] (LambdaBody
                                                                         (Just (Projector (True, True) index var))
@@ -652,11 +606,11 @@ convertAST staticContext poset expr =
                 cvtBranch :: T.TypedCaseBranchF TaggedTExpr -> Translator Alternative
                 cvtBranch (T.TypedCaseBranch pat branch) = do
                     (p, ids) <- convertPattern (tag branch) pat
-                    cvtBranch <- local (idMap %~ M.union (M.map (\tv -> ((isRelevant mul || isVarPattern pat, isAffine mul), baseVar tv)) ids)) $ convert branch
+                    cvtBranch <- local (idMap %~ M.union (M.map (\tv -> ((isRelevant mul && isVarPattern pat, isAffine mul), baseVar tv)) ids)) $ convert branch
                     affine <- affineCtx
                     pure (Alt (affine && isAffine mul) p cvtBranch)
 
-        convert (ApplicationT _ fun arg) = do
+        convert (ApplicationT t fun arg) = do
             let (T.FunctionType _ (T.Arrow mul) _) = typeof fun
             collectArgs fun [(mul, arg)]
             where
@@ -677,7 +631,7 @@ convertAST staticContext poset expr =
                         liftArgs (map (\(_, e) -> (True, MAtom P.Linear, e)) args) (ConsApp aff name)
                     | M.member name (staticContext ^. T.dataConstructors) = do
                         aff <- affineCtx
-                        liftArgs (map (\(_, expr) -> (False, MAtom P.Normal, expr)) args) (ConsApp aff name)
+                        liftArgs (map (\(m, expr) -> (False, m, expr)) args) (ConsApp aff name)
                     | otherwise = do
                         funVar <- lookupVar name
                         rel <- relevantCtx
@@ -685,20 +639,20 @@ convertAST staticContext poset expr =
                         case funVar of
                           Just v -> do
                               argStrictness <- gets ((M.! v) . (^. strictness))
-                              liftArgs (zipWith (\s (m, e) -> (s && rel, m, e)) argStrictness args) (Application (rel, aff) v)
+                              liftArgs (zipWith (\s (m, e) -> (s && rel, m, e)) argStrictness args) (Application (typeToTType t) (rel, aff) v)
                           Nothing -> pure Error
                 collectArgs expr args = do
                     -- Innermost function is GU if the application is GU
                     funExpr <- convert expr
                     rel <- relevantCtx
                     case funExpr of
-                      Let binds (Application strict funVar []) -> do
-                          liftArgs (map (\(m, e) -> (rel && isRelevant m, m, e)) args) (Let binds . Application strict funVar)
+                      Let binds (Application _ strict funVar []) -> do
+                          liftArgs (map (\(m, e) -> (rel && isRelevant m, m, e)) args) (Let binds . Application (typeToTType t) strict funVar)
                       _ -> do
                           let funTy = typeToTType (typeof expr)
                           funVar <- freshName
                           affine <- affineCtx
-                          let alt = Alt affine (VarPattern (TV funVar funTy)) . Application (rel, affine) funVar
+                          let alt = Alt affine (VarPattern (TV funVar funTy)) . Application (typeToTType t) (rel, affine) funVar
                               caseExpr = Case funExpr . NE.singleton . alt
                           liftArgs (map (\(m, e) -> (rel && isRelevant m, m, e)) args) caseExpr
 
@@ -713,12 +667,7 @@ convertAST staticContext poset expr =
             aff <- relevantCtx
             (mkBind, var) <- makeThunk False id Nothing lam
             bind <- mkBind
-            -- modify (builtBindings %~ M.insert (tag lam) ([bind], ))
-            pure (Let [bind] (Application (rel, aff) var []))
-            -- let lambdaTy = ttype t
-            -- lambdaName <- freshName
-            -- bind <- LazyBinding Nothing (TV lambdaName lambdaTy) <$> convertLambdas lam
-            -- pure (Let [bind] (Application lambdaName []))
+            pure (Let [bind] (Application (typeToTType t) (rel, aff) var []))
 
         convert (VariableT t name)
             | isJust (B.getPrimitive name) = do
@@ -732,12 +681,11 @@ convertAST staticContext poset expr =
                 aff <- affineCtx
                 funVar <- lookupVar name
                 case funVar of
-                  Just v -> pure (Application (rel, aff) v [])
+                  Just v -> pure (Application (typeToTType t) (rel, aff) v [])
                   Nothing -> pure Error
 
         convert (TupleT t ts) = do
-            rel <- relevantCtx
-            (argVars, binds, projectors) <- unzip3 <$> mapM (liftFuncArg rel (MAtom P.Linear)) ts
+            (argVars, binds, projectors) <- unzip3 <$> mapM (liftFuncArg False (MAtom P.Linear)) ts
             let combinedProjector = foldr (.) id projectors
             pure (Let (catMaybes binds) (combinedProjector (PackedTuple argVars)))
 
@@ -791,7 +739,6 @@ convertAST staticContext poset expr =
             modify (strictness %~ M.insert bindVar (getArgStrictness (typeof expr)))
             let name' = fromMaybe ("__thunk_" ++ show (tag expr)) patternName
                 binding = do
-                    -- lf <- local (bound %~ S.insert bindVar) $ convertLambdas expr
                     lf <- lockAffineOnPath lock $ updateContext $ convertLambdas expr
                     case lf of
                       Left lambdaForm -> pure (LazyBinding name' (TV bindVar (typeToTType (typeof expr))) lambdaForm)
@@ -816,7 +763,7 @@ convertAST staticContext poset expr =
                   modify (builtBindings %~ M.insert (tag lam) lambdaForm)
                   pure (Left lambdaForm)
             where
-                collectLambdas' :: Int -> [(Var, T.Pattern, Multiplicity, Tag)] -> TaggedTExpr
+                collectLambdas' :: Int -> [(Var, T.Pattern, TranslateType, Multiplicity, Tag)] -> TaggedTExpr
                                 -> Translator ([(Bool, TypedVar)], LambdaBody)
                 collectLambdas' depth toMatch (LambdaT (T.FunctionType from _ _) mul (T.VariablePattern _ name) body) = do
                     varName <- freshName
@@ -826,7 +773,7 @@ convertAST staticContext poset expr =
                 collectLambdas' depth toMatch (LambdaT (T.FunctionType from _ _) mul pat body) = do
                     varName <- freshName
                     modify (strictness %~ M.insert varName (getArgStrictness from))
-                    (vs, expr) <- collectLambdas' (depth + 1) ((varName, pat, mul, tag body):toMatch) body
+                    (vs, expr) <- collectLambdas' (depth + 1) ((varName, pat, typeToTType from, mul, tag body):toMatch) body
                     pure ((isRelevant mul && not (isFunctionType from), TV varName (typeToTType from)):vs, expr)
                 collectLambdas' depth toMatch expr = do
                     locked <- asks (^. lockAffine)
@@ -840,16 +787,16 @@ convertAST staticContext poset expr =
                     normalBase <- Just <$> withContext (const False) (const False) (buildCases (reverse toMatch))
                     pure ([], LambdaBody linearBase relevantBase affineBase normalBase)
                     where
-                        buildCases :: [(Var, T.Pattern, Multiplicity, Tag)] -> Translator CodegenExpr
+                        buildCases :: [(Var, T.Pattern, TranslateType, Multiplicity, Tag)] -> Translator CodegenExpr
                         buildCases [] = convert expr
-                        buildCases ((v, pat, mul, tag):rest) = do
+                        buildCases ((v, pat, t, mul, tag):rest) = do
                             rel <- relevantCtx
                             affine <- affineCtx
                             (p, ids) <- convertPattern tag pat
                             local (idMap %~ M.union (M.map (\tv -> ((isRelevant mul, isAffine mul), baseVar tv)) ids)) $ do
                                 -- baseExpr <- (if isAffine mul then Free v else id) <$> buildCases rest
                                 baseExpr <- buildCases rest
-                                pure (Case (Application (rel && isRelevant mul, affine && isAffine mul) v [])
+                                pure (Case (Application t (rel && isRelevant mul, affine && isAffine mul) v [])
                                            (NE.singleton (Alt (affine && isAffine mul) p baseExpr)))
 
         convertLambdas expr = do
@@ -900,7 +847,6 @@ convertAST staticContext poset expr =
         liftFuncArg :: Bool -> Multiplicity -> TaggedTExpr
                     -> Translator (Atom, Maybe Binding, CodegenExpr -> CodegenExpr)
         liftFuncArg strict mul var@(VariableT t name)
-            -- | not (M.member name (staticContext ^. T.defaultFunctions))
             | not (M.member name (staticContext ^. T.dataConstructors)) = do
                 rel <- relevantCtx
                 aff <- affineCtx
@@ -911,7 +857,7 @@ convertAST staticContext poset expr =
                        matchVar <- freshName
                        -- We can always mark this as false -- the pattern is just a variable
                        let alt = Alt False (VarPattern (TV matchVar (typeToTType t)))
-                           matcher = Case (Application (True, aff && affineVar) argVar []) . NE.singleton . alt
+                           matcher = Case (Application (typeToTType t) (True, aff && affineVar) argVar []) . NE.singleton . alt
                        pure (Var matchVar, Nothing, matcher)
                    else do
                        strictVar <- lookupRelevance name
@@ -921,41 +867,30 @@ convertAST staticContext poset expr =
                               let bind = BoxBinding ("__thunk_" ++ show (tag var)) boxVar argVar
                               pure (Var boxVar, Nothing, Let [bind])
                           else pure (Var argVar, Nothing, id)
-        -- liftFuncArg (mul, arg@(T.Literal t lit))
-        --     | primitive lit = do
-        --         gu <- asks (^. guaranteed)
-        --         if gu && isRelevant mul
-        --            then pure (Lit (convertLit lit), Nothing, id)
-        --            else do
-        --                cvtArg <- local (guaranteed .~ False) $ convertLambdas arg
-        --                bindVar <- freshName
-        --                let binding = LazyBinding Nothing (TV bindVar (ttype t)) cvtArg
-        --                pure (Var bindVar, Just binding, id)
-        --     where
-        --         primitive :: P.Literal a -> Bool
-        --         primitive (P.IntLiteral _) = True
-        --         primitive (P.RealLiteral _) = True
-        --         primitive _ = False
-
-        --         convertLit :: P.Literal T.TypedExpr -> PrimitiveLiteral
-        --         convertLit (P.IntLiteral i) = IntLiteral i
-        --         convertLit (P.RealLiteral r) = RealLiteral r
         liftFuncArg strict mul arg = do
-            if strict
-               then do
-                   cvtArg <- withContext (&& isRelevant mul) (&& isAffine mul) $ convert arg
-                   matchVar <- freshName
-                   let alt = Alt False (VarPattern (TV matchVar (typeToTType (typeof arg))))
-                       matcher = Case cvtArg . NE.singleton . alt
-                   pure (Var matchVar, Nothing, matcher)
-               else do
-                   cvtArg <- withRelevant (const False) $ convertLambdas arg
-                   bindVar <- freshName
-                   let name = "__thunk_" ++ show (tag arg) 
-                       binding = case cvtArg of
-                                   Left lf -> LazyBinding name (TV bindVar (typeToTType (typeof arg))) lf
-                                   Right caps -> Reuse bindVar name (tag arg) caps
-                   pure (Var bindVar, Just binding, id)
+            let name = "__thunk_" ++ show (tag arg) 
+            rel <- relevantCtx
+            if strict then do
+                cvtArg <- withContext (&& isRelevant mul) (&& isAffine mul) $ convert arg
+                matchVar <- freshName
+                let alt = Alt False (VarPattern (TV matchVar (typeToTType (typeof arg))))
+                    matcher = Case cvtArg . NE.singleton . alt
+                pure (Var matchVar, Nothing, matcher)
+            else if rel && isRelevant mul then do
+                cvtArg <- withContext (&& isRelevant mul) (&& isAffine mul) $ convert arg
+                matchVar <- freshName
+                bindVar <- freshName
+                let alt = Alt False (VarPattern (TV matchVar (typeToTType (typeof arg))))
+                    box = BoxBinding name bindVar matchVar
+                    matcher = Case cvtArg . NE.singleton . alt . Let [box]
+                pure (Var bindVar, Nothing, matcher)
+            else do
+                cvtArg <- withRelevant (const False) $ convertLambdas arg
+                bindVar <- freshName
+                let binding = case cvtArg of
+                                Left lf -> LazyBinding name (TV bindVar (typeToTType (typeof arg))) lf
+                                Right caps -> Reuse bindVar name (tag arg) caps
+                pure (Var bindVar, Just binding, id)
 
         isRelevant :: Multiplicity -> Bool
         isRelevant mul = P.leq mul (T.MAtom P.Relevant) poset
@@ -1003,10 +938,4 @@ convertAST staticContext poset expr =
             v <- gets (^. nextVar)
             modify (nextVar %~ (+1))
             pure (V v)
-
-testTranslate :: String -> CodegenExpr
-testTranslate s =
-    let (Right parsed) = test_parseExpr s
-        (Right (typed, poset)) = typecheck Builtin.Builtin.defaultBuiltins parsed
-     in convertAST Builtin.Builtin.defaultBuiltins poset typed
 

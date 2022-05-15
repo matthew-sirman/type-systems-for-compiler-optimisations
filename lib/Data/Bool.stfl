@@ -1,0 +1,75 @@
+---------------------
+-- Boolean library --
+---------------------
+--
+-- Contains basic functions for booleans
+--  - integer comparisons
+--
+
+data Ordering where
+    | EQ : Ordering
+    | LT : Ordering
+    | GT : Ordering
+    ;;
+
+(==) : Int -o Int -o Bool;;
+(MkInt# x) == (MkInt# y) =
+    case !MkInt# (x ==# y) of
+        0 -> False;
+        1 -> True;;
+
+(!=) : Int -o Int -o Bool;;
+(MkInt# x) != (MkInt# y) =
+    case !MkInt# (x !=# y) of
+        0 -> False;
+        1 -> True;;
+
+(>) : Int -o Int -o Bool;;
+(MkInt# x) > (MkInt# y) =
+    case !MkInt# (x ># y) of
+        0 -> False;
+        1 -> True;;
+
+(<) : Int -o Int -o Bool;;
+(MkInt# x) < (MkInt# y) =
+    case !MkInt# (x <# y) of
+        0 -> False;
+        1 -> True;;
+
+(>=) : Int -o Int -o Bool;;
+(MkInt# x) >= (MkInt# y) =
+    case !MkInt# (x >=# y) of
+        0 -> False;
+        1 -> True;;
+
+(<=) : Int -o Int -o Bool;;
+(MkInt# x) <= (MkInt# y) =
+    case !MkInt# (x <=# y) of
+        0 -> False;
+        1 -> True;;
+
+(<=>) : Int -o Int -o Ordering;;
+(MkInt# x) <=> (MkInt# y) =
+    case !MkInt# (x <=># y) of
+        0 -> EQ;
+        1 -> LT;
+        2 -> GT;;
+
+not : Bool -o Bool;;
+not b =
+    case !b of
+        False -> True;
+        True -> False;;
+
+(||) : Bool -o Bool ->? Bool;;
+a || b =
+    case !a of
+        True -> True;
+        False -> b;;
+
+(&&) : Bool -o Bool ->? Bool;;
+a && b =
+    case !a of
+        True -> b;
+        False -> False;;
+

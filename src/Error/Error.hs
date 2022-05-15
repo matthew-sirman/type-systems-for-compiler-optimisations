@@ -2,6 +2,8 @@ module Error.Error (
     showContext
     ) where
 
+-- Error message pretty printing
+
 import Parser.AST (SourceLocation(..))
 
 import Data.List (intercalate)

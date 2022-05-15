@@ -1,6 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Compiler.RegisterAllocator where
 
+-- Register allocation for STFL-IR code
+
 import qualified IR.BasicBlock as IR
 
 import qualified IR.Analysis.FlowGraph as IR

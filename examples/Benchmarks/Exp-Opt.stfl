@@ -1,0 +1,18 @@
+import Numeric;;
+import Data.Bool;;
+
+exp : Int -> Int -> + Int;;
+exp a b =
+    case +b of
+        0 -> 1;
+        1 -> a;
+        b ->
+            let t = exp a (b / 2)
+             in if +(b % 2) == 0 then
+                    t * t
+                else
+                    a * t * t;;
+
+main : Int;;
+main = exp 2 13121;;
+

@@ -1,0 +1,40 @@
+import Numeric;;
+
+data Instruction where
+    | PushInt : Int -o Instruction
+    | IAdd : Instruction
+    | ISub : Instruction
+    | IMul : Instruction
+    | IDiv : Instruction
+    ;;
+
+data Expr where
+    | C : Int -o Expr
+    | Add : Expr -o Expr -o Expr
+    | Sub : Expr -o Expr -o Expr
+    | Mul : Expr -o Expr -o Expr
+    | Div : Expr -o Expr -o Expr
+    ;;
+
+compile : Expr -> [Instruction] -> [Instruction];;
+compile e is =
+    case e of
+        (C c) -> PushInt c :: is;
+        (Add l r) -> compile r (compile l (IAdd :: is));
+        (Sub l r) -> compile r (compile l (ISub :: is));
+        (Mul l r) -> compile r (compile l (IMul :: is));
+        (Div l r) -> compile r (compile l (IDiv :: is));;
+
+execute : [Int] -> [Instruction] -> Int;;
+execute stack is =
+    case is of
+        ((PushInt c)::is) -> execute (c :: stack) is;
+        (IAdd::is) -> (case stack of (l::(r::stack)) -> execute ((l + r)::stack) is);
+        (ISub::is) -> (case stack of (l::(r::stack)) -> execute ((l - r)::stack) is);
+        (IMul::is) -> (case stack of (l::(r::stack)) -> execute ((l * r)::stack) is);
+        (IDiv::is) -> (case stack of (l::(r::stack)) -> execute ((l / r)::stack) is);
+        [] -> (case stack of (res::stack) -> res);;
+
+main : Int;;
+main = execute [] (compile (Mul (Add (Mul (C 5) (Div (C 10) (C 3))) (Sub (C 20) (C 10))) (Add (Mul (C 5) (Div (C 10) (C 3))) (Sub (C 20) (C 10)))) []);;
+

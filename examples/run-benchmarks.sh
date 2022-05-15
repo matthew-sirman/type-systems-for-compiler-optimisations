@@ -4,13 +4,13 @@ FILES="examples/Benchmarks/*"
 OUTPUT=$1
 echo "Outputting results to $OUTPUT"
 
-echo "TestName, StaticMem, DynamicMem, FreedMem, MaxMemHeld, Instructions, Reads, Writes" > $OUTPUT
+echo "TestName,StaticMem,DynamicMem,FreedMem,MaxMemHeld,Instructions,Reads,Writes" > $OUTPUT
 
 for benchmark in $FILES
 do
     echo "Running benchmark $benchmark..."
     TEST=$(basename -s ".stfl" "$benchmark")
-    RESULT=$(stack run "$benchmark" -- --output-csv)
+    RESULT=$(stack run "$benchmark" -- --output-csv --lib-dirs lib)
     echo "$TEST, $RESULT" >> $OUTPUT
 done
 

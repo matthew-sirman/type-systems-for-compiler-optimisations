@@ -9,9 +9,9 @@ data IList where
     | Cons : Int -o IList -o IList
     ;;
 
-take : Int -o IList ->? IList;;
+take : Int ->? IList ->? IList;;
 take n xs =
-    case !n of
+    case ?n of
       0 -> Nil;
       n -> case ?xs of
              Nil -> Nil;
@@ -23,5 +23,5 @@ eContFrac =
      in Cons 2 (aux 2);;
 
 main : IList;;
-main = take 30 eContFrac;;
+main = take 50 eContFrac;;
 

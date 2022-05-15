@@ -1,0 +1,56 @@
+-----------------
+-- Set library --
+-----------------
+--
+-- Contains data type definition for integer sets
+--  - membership functions
+--  - insertion functions
+--
+
+import Data.Bool;;
+import Data.Maybe;;
+
+data Set where
+    | SLeaf : Set
+    | SBranch : Int -> + Set -o Set -o Set
+    ;;
+
+emptySet : Set;;
+emptySet = SLeaf;;
+
+fromList : [Int] -> + Set;;
+fromList xs =
+    case +xs of
+        [] -> emptySet;
+        (x::xs) -> insertSet x (fromList xs);;
+
+insertSet : Int -> + Set -o Set;;
+insertSet key s =
+    case !s of
+        SLeaf -> SBranch key SLeaf SLeaf;
+        (SBranch k' l r) ->
+            case +key <=> k' of
+                EQ -> SBranch k' l r;
+                LT -> SBranch k' (insertSet key l) r;
+                GT -> SBranch k' l (insertSet key r);;
+
+mergeSets : Set -o Set -o Set;;
+mergeSets s1 s2 =
+    case !s1 of
+        SLeaf -> s2;
+        (SBranch e1 l1 r1) ->
+            case !s2 of
+                SLeaf -> SBranch e1 l1 r1;
+                (SBranch e2 l2 r2) ->
+                    SBranch e1 l1 (SBranch e2 (mergeSets r1 l2) r2);;
+
+member : Int -> Set ->? Bool;;
+member key s =
+    case ?s of
+        SLeaf -> False;
+        (SBranch k' l r) ->
+            case !key <=> k' of
+                EQ -> True;
+                LT -> member key l;
+                GT -> member key r;;
+

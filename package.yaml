@@ -36,6 +36,7 @@ library:
   - binary
   - bytestring
   - data-fix
+  - directory
 
 executables:
   type-systems-for-compiler-optimisations-exe:

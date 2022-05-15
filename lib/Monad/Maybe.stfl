@@ -1,0 +1,18 @@
+-----------------
+-- Maybe Monad --
+-----------------
+--
+-- Contains the monad instanace for the Maybe Monad
+--
+
+import Data.Maybe;;
+
+(>>=) : Maybe a ->@p (a ->@p Maybe b) ->? Maybe b;;
+ma >>= f =
+    case @p ma of
+        Nothing -> Nothing;
+        (Just x) -> f x;;
+
+return : a -o Maybe a;;
+return x = Just x;;
+

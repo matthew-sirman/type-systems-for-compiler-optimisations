@@ -1,0 +1,46 @@
+-----------------
+-- Map library --
+-----------------
+--
+-- Contains data type definition for integer key maps
+--  - lookup functions
+--  - insertion functions
+--
+
+import Data.Bool;;
+import Data.Maybe;;
+
+data Map v where
+    | MLeaf : Map v
+    | MBranch : Int -o v -o Map v -o Map v -o Map v
+    ;;
+
+emptyMap : Map v;;
+emptyMap = MLeaf;;
+
+insertMap : Int -> + v -o Map v -> + Map v;;
+insertMap key val m =
+    case +m of
+        MLeaf -> MBranch key val MLeaf MLeaf;
+        (MBranch k' v' l r) ->
+            if +key < k'
+                then MBranch k' v' (insertMap key val l) r
+                else MBranch k' v' l (insertMap key val r);;
+
+lookup : Int -> Map v -> Maybe v;;
+lookup key m =
+    case m of
+        MLeaf -> Nothing;
+        (MBranch k' v l r) ->
+            if key == k' then 
+                Just v
+            else if ?key < k' then
+                lookup key l
+            else
+                lookup key r;;
+
+(!!) : Map v -> Int -> v;;
+m !! key =
+    case lookup key m of
+        (Just v) -> v;;
+

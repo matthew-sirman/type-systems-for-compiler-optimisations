@@ -1,9 +1,9 @@
 module Builtin.Builtin where
-     -- ( defaultBuiltins
-     -- ) where
+
+-- Builtin functions and types which are non-definable in the syntax
+-- or expected to be available without any imports
 
 import Typing.Types
-import Builtin.Types
 import Parser.AST 
     ( Identifier(..)
     , Loc(..)
@@ -36,10 +36,12 @@ functions = M.fromList
     , funcLessThan
     , funcGreaterEqual
     , funcLessEqual
+    , funcCompare
     , funcAdd
     , funcSub
     , funcMul
     , funcDiv
+    , funcMod
     , funcUndefined
     ]
 
@@ -60,21 +62,25 @@ types = M.fromList
     , typeBool
     , typeListCons
     , typeInt
+    , typeUInt
     , typeReal
+    , typeUReal
     ]
 
 funcEquals, funcNotEquals, funcGreaterThan, funcLessThan, funcGreaterEqual, funcLessEqual,
-    funcAdd, funcSub, funcMul, funcDiv, funcUndefined :: BuiltinFunction
-funcEquals       = (I "==#", makeScheme "Int# -o Int# -o Bool")
-funcNotEquals    = (I "!=#", makeScheme "Int# -o Int# -o Bool")
-funcGreaterThan  = (I ">#", makeScheme "Int# -o Int# -o Bool")
-funcLessThan     = (I "<#", makeScheme "Int# -o Int# -o Bool")
-funcGreaterEqual = (I ">=#", makeScheme "Int# -o Int# -o Bool")
-funcLessEqual    = (I "<=#", makeScheme "Int# -o Int# -o Bool")
+    funcCompare, funcAdd, funcSub, funcMul, funcDiv, funcMod, funcUndefined :: BuiltinFunction
+funcEquals       = (I "==#", makeScheme "Int# -o Int# -o Int#")
+funcNotEquals    = (I "!=#", makeScheme "Int# -o Int# -o Int#")
+funcGreaterThan  = (I ">#", makeScheme "Int# -o Int# -o Int#")
+funcLessThan     = (I "<#", makeScheme "Int# -o Int# -o Int#")
+funcGreaterEqual = (I ">=#", makeScheme "Int# -o Int# -o Int#")
+funcLessEqual    = (I "<=#", makeScheme "Int# -o Int# -o Int#")
+funcCompare      = (I "<=>#", makeScheme "Int# -o Int# -o Int#")
 funcAdd          = (I "+#", makeScheme "Int# -o Int# -o Int#")
 funcSub          = (I "-#", makeScheme "Int# -o Int# -o Int#")
 funcMul          = (I "*#", makeScheme "Int# -o Int# -o Int#")
 funcDiv          = (I "/#", makeScheme "Int# -o Int# -o Int#")
+funcMod          = (I "%#", makeScheme "Int# -o Int# -o Int#")
 funcUndefined    = (I "undefined", makeScheme "a")
 
 consUnit, consTrue, consFalse, consListNil, consListCons, consMkInt, consMkReal :: BuiltinConstructor
@@ -86,12 +92,14 @@ consListCons = (I "::", makeConsScheme "a -o [a] -o [a]")
 consMkInt = (I "MkInt#", makeConsScheme "Int# -o Int")
 consMkReal = (I "MkReal#", makeConsScheme "Real# -o Real")
 
-typeUnit, typeBool, typeListCons, typeInt, typeReal :: BuiltinType
+typeUnit, typeBool, typeListCons, typeInt, typeUInt, typeReal, typeUReal :: BuiltinType
 typeUnit = (I "()", collectTypeVars [consUnit])
 typeBool = (I "Bool", collectTypeVars [consFalse, consTrue])
 typeListCons = (I "[]", collectTypeVars [consListNil, consListCons])
 typeInt = (I "Int", collectTypeVars [consMkInt])
+typeUInt = (I "Int#", (S.empty, []))
 typeReal = (I "Real", collectTypeVars [consMkReal])
+typeUReal = (I "Real#", (S.empty, []))
 
 makeScheme :: String -> TypeScheme
 makeScheme = fst . makeConsScheme

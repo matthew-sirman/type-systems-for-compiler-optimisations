@@ -1,0 +1,46 @@
+-------------------------
+-- State monad library --
+-------------------------
+--
+-- Contains the monad definition for the State monad
+--
+
+data State s a where
+    | State : (s -> ? (a, s)) -o State s a
+    ;;
+
+runState : State s a ->? s -> ? (a, s);;
+runState (State f) s = f s;;
+
+evalState : State s a -> ? s -> a;;
+evalState (State m) s =
+    let ?(a, s') = m s
+     in a;;
+
+execState : State s a -> ? s -> s;;
+execState (State m) s =
+    let ?(a, s') = m s
+     in s';;
+
+(>>=) : State s a -> ? (a -> ? State s b) -> ? State s b;;
+(State ma) >>= f = State (\s -> ?
+    let ?(a, s') = ma s
+     in runState (f a) s');;
+
+return : a -o State s a;;
+return x = State (\s -> ? (x, s));;
+
+(>>) : State s a -> ? State s b -> ? State s b;;
+ma >> mb = ma >>= (\x -> ? mb);;
+
+modify : (s -> ? s) -> State s ();;
+modify fn = State (\s -> ? ((), fn s));;
+
+set : s -o State s ();;
+set s = State (\s' -> ? ((), s));;
+
+view : (s ->? (s, State s a)) ->? State s a;;
+view f = State (\s ->? 
+    let ?(s', state) = f s
+     in runState state s');;
+

@@ -1,15 +1,11 @@
-(+) : Int -o Int -o Int;;
-(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+import Numeric;;
 
-(-) : Int -o Int -o Int;;
-(MkInt# x) - (MkInt# y) = MkInt# (x -# y);;
-
-fib_fast_n : Int -> Int -> Int -> Int;;
-fib_fast_n n a b = case n of
+fib_fast : Int -> Int -> Int -> Int;;
+fib_fast n a b = case n of
     0 -> a;
     1 -> b;
-    n -> fib_fast_n (n - 1) (a + b) a;;
+    n -> fib_fast (n - 1) (a + b) a;;
 
 main : Int;;
-main = fib_fast_n 10 1 1;;
+main = fib_fast 100 1 1;;
 

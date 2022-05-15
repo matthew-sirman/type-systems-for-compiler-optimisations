@@ -1,6 +1,8 @@
 {-# LANGUAGE TemplateHaskell, ScopedTypeVariables #-}
 module IR.Program where
 
+-- STFL-IR Program data structure
+
 import IR.Instructions (FunctionID, GlobalBlock)
 import IR.Function
 import IR.DataType

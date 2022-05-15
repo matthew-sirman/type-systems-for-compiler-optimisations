@@ -15,7 +15,6 @@ import Parser.AST
     )
 
 import Typing.Types
-import qualified Builtin.Types as B
 
 import qualified Util.Stream as Stream
 import qualified Util.ConstrainedPoset as P
@@ -28,8 +27,6 @@ import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import qualified Data.DisjointSet as DS
 import Data.Maybe (isJust, fromMaybe)
-
-import Debug.Trace
 
 extendGeneralise :: Context -> [(Multiplicity, Loc SourcePattern, Type)]
                  -> Checker (Context, [Pattern])
@@ -407,20 +404,6 @@ addRelation loc p' q' = do
     case P.addLeq p' q' rel of
       Just rel' -> modify (mulRelation .~ rel')
       Nothing -> typeError $ MOrderingViolation loc p' q'
-
--- mulUnify loc 
--- 
---         mUnify' :: Multiplicity -> Multiplicity -> Checker ()
---         mUnify' p@(MPoly {}) t = modify (mulEquivalences %~ DS.union p t)
---         mUnify' t p@(MPoly {}) = modify (mulEquivalences %~ DS.union p t)
---         mUnify' (MAtom a) (MAtom b)
---             | a == b = pure ()
---             | otherwise = typeError $ MAtomUnificationFailure loc a b
---         mUnify' (MProd l r) (MProd l' r') = do
---             mUnify' l l'
---             mUnify' r r'
---         -- TODO: Think some more about this particular constraint
---         mUnify' p q = modify (mulEquivalences %~ DS.union p q)
 
 bindTypeVar :: SourceLocation -> TypeVar -> Type -> Checker ()
 bindTypeVar _ var (Poly var')

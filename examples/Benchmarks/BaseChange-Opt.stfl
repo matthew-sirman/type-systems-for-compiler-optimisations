@@ -1,0 +1,13 @@
+import Numeric;;
+import Data.Bool;;
+
+baseChange : Int -> + Int -> + Int;;
+baseChange base n =
+    if +n < base then
+        n
+    else
+        (10 * (baseChange base (n / base))) + (n % base);;
+
+main : Int;;
+main = baseChange 8 223115461441431532;;
+

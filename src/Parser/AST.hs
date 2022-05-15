@@ -62,7 +62,8 @@ newtype Identifier = I String
     deriving (Eq, Ord, Generic)
 
 data Statement
-    = TypeDecl (Loc Identifier) (Loc TypeExpr)
+    = Import (Loc [String])
+    | TypeDecl (Loc Identifier) (Loc TypeExpr)
     | FuncDecl (Loc Identifier) (Loc ValExpr)
     | TypeDef (Loc TypeDefinition)
     deriving (Eq)
@@ -148,6 +149,7 @@ instance Monoid Identifier where
 ---------------------------------------
 
 instance Show Statement where
+    show (Import names) = "import " ++ intercalate "." (syntax names)
     show (TypeDecl name t) = show name ++ " : " ++ show t
     show (FuncDecl name body) = show name ++ " = " ++ show body
     show (TypeDef def) = show def

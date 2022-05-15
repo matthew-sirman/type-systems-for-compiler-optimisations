@@ -1,5 +1,5 @@
-(+) : Int -o Int -o Int;;
-(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+import Numeric;;
+import Data.Bool;;
 
 sum : [Int] -o Int;;
 sum xs =
@@ -13,6 +13,13 @@ xs ++ ys =
         [] -> ys;
         (x::xs) -> x :: (xs ++ ys);;
 
+fromTo : Int -> + Int -> + [Int];;
+fromTo a b =
+    if +a < b then
+        a :: fromTo (a + 1) b
+    else
+        [];;
+
 main : Int;;
-main = sum (1::2::3::4::5::6::7::8::9::10::[] ++ 11::12::13::14::15::16::17::18::19::20::[]);;
+main = sum (fromTo 1 30 ++ fromTo 31 60);;
 

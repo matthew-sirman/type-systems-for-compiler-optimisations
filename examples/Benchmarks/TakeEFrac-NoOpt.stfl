@@ -23,5 +23,5 @@ eContFrac =
      in Cons 2 (aux 2);;
 
 main : IList;;
-main = take 30 eContFrac;;
+main = take 50 eContFrac;;
 

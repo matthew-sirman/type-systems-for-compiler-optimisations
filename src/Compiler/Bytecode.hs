@@ -1,6 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Compiler.Bytecode where
 
+-- Bytecode generator for mapping STFL-IR into the STFL-AM bytecode
+
 import Compiler.Compiler as C
 import Compiler.RegisterAllocator as C
 import qualified IR.Instructions as IR
@@ -21,11 +23,6 @@ import Data.List (intercalate)
 
 import Control.Lens
 import Control.Monad.State
-
--- TODO: Remove
-import Debug.Trace
-
--- type BytecodeInstruction = IR.Instruction Int Int Int
 
 data Register
     = Reg Word64
@@ -388,7 +385,4 @@ eraseLabels = do
                         -> [(Maybe TargetHole, BytecodeInstruction TargetHole)]
         updateHeadLabel _ [] = []
         updateHeadLabel l ((_, i):is) = (Just l, i) : is
-
-testEverything3 :: String -> Bytecode
-testEverything3 = generateBytecode . testCompile
 

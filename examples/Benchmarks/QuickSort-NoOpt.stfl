@@ -1,0 +1,36 @@
+import Data.Bool;;
+import Numeric;;
+
+data IList where
+    | Nil : IList
+    | Cons : Int -o IList -o IList
+    ;;
+
+(++) : IList -o IList -o IList;;
+xs ++ ys =
+    case !xs of
+        Nil -> ys;
+        (Cons x xs) -> Cons x (xs ++ ys);;
+
+partition : Int -> IList -> (IList, IList);;
+partition n xs =
+    case xs of
+        Nil -> (Nil, Nil);
+        (Cons x xs) ->
+            let (ls, rs) = partition n xs
+             in if x < n
+                    then (Cons x ls, rs)
+                    else (ls, Cons x rs);;
+
+quicksort : IList -> IList;;
+quicksort xs =
+    case xs of
+        Nil -> Nil;
+        (Cons x Nil) -> Cons x Nil;
+        (Cons x xs) ->
+            let (ls, rs) = partition x xs
+             in quicksort ls ++ Cons x (quicksort rs);;
+
+main : IList;;
+main = quicksort (Cons 8 (Cons 2 (Cons 7 (Cons 11 (Cons 4 (Cons 3 (Cons 10 (Cons 15 (Cons 1 (Cons 9 (Cons 2 (Cons 7 (Cons 1 (Cons 22 Nil))))))))))))));;
+

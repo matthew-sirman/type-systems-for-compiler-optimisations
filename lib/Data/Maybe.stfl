@@ -1,0 +1,12 @@
+-----------
+-- Maybe --
+-----------
+--
+-- Contains data type for Maybe
+--
+
+data Maybe a where
+    | Nothing : Maybe a
+    | Just : a -o Maybe a
+    ;;
+

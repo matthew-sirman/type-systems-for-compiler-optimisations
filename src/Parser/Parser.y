@@ -33,6 +33,8 @@ import Data.Maybe (fromJust)
 %expect 22
 
 %token
+    import              { L _ DImport }
+    '.'                 { L _ DDot }
     let                 { L _ KWlet }
     and                 { L _ KWand }
     in                  { L _ KWin }
@@ -100,7 +102,8 @@ stmts :: { [Loc Statement] }
     | stmts stmt                                        { $2 : $1 }
 
 stmt :: { Loc Statement }
-    : lvar ':' type ';;'                                { loc (TypeDecl (idTok $1) $3) $1 $> }
+    : import import_name ';;'                           { loc (Import $2) $1 $> }
+    | lvar ':' type ';;'                                { loc (TypeDecl (idTok $1) $3) $1 $> }
     | '(' infix_op ')' ':' type ';;'                    { loc (TypeDecl $2 $5) $1 $> }
     | lvar seq(pattern) '=' expr ';;'                   { loc (makeFuncDecl (idTok $1) $2 $4) $1 $> }
     | pattern infix_op pattern '=' expr ';;'            { loc (makeFuncDecl $2 [$1, $3] $5) $1 $> }
@@ -249,6 +252,11 @@ maybe(p)
     : {- empty -}                                       { Nothing }
     | p                                                 { Just $1 }
 
+import_name :: { Loc [String] }
+import_name
+    : uvar                                              { loc [plainFileString $1] $1 $> }
+    | uvar '.' import_name                              { loc (plainFileString $1 : syntax $3) $1 $> }
+
 {
 
 idTok :: Loc Token -> Loc Identifier
@@ -261,6 +269,9 @@ rawId (L _ (TokInfixId name)) = name
 rawId (L _ (TokLowerId name)) = name
 rawId (L _ (TokUpperId name)) = name
 rawId (L _ (TokMultiplicityId name)) = name
+
+plainFileString :: Loc Token -> String
+plainFileString (L _ (TokUpperId (I name))) = name
 
 intTok :: Loc Token -> Int
 intTok (L _ (TokIntegerLit i)) = i

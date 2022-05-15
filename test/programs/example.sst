@@ -1,9 +1,0 @@
-let *fact = \x ->+ case +x of
-    | 0 -> 1
-    | n -> n * (fact (n - 1))
-and *fib = \n -> case *n of
-    | 0 -> 1
-    | 1 -> 1
-    | m -> fib (m - 1) + fib (m - 2)
-in
-fact 1

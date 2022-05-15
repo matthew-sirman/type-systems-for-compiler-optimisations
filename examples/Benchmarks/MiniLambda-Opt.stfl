@@ -1,0 +1,27 @@
+import Data.Bool;;
+
+data Term where
+    | Constant : Int -o Term
+    | Var : Int -o Term
+    | Abs : Int -o Term -o Term
+    | App : Term -o Term -o Term
+    ;;
+
+sub : Term -> Int -> Term -> + Term;;
+sub e x t =
+    case +t of
+        (Var v) -> if !x == v then e else t;
+        (Abs a body) -> Abs a (sub e x body);
+        (App f a) -> App (sub e x f) (sub e x a);
+        t -> t;;
+
+evaluate : Term -> Term;;
+evaluate t =
+    case t of
+        (App (Abs x e) a) -> evaluate (sub a x e);
+        (App f a) -> evaluate (App (evaluate f) a);
+        t -> t;;
+
+main : Term;;
+main = evaluate (App (App (Abs 0 (Abs 1 (App (Var 0) (Var 1)))) (Abs 2 (Var 2))) (App (Abs 3 (Var 3)) (Constant 5)));;
+

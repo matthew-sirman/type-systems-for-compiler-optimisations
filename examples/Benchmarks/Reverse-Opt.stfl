@@ -1,0 +1,24 @@
+import Numeric;;
+import Data.Bool;;
+
+data IList where
+    | Nil : IList
+    | Cons : Int -o IList -o IList
+    ;;
+
+reverse : IList -o IList -o IList;;
+reverse xs rs =
+    case !xs of
+        Nil -> rs;
+        (Cons x xs) -> reverse xs (Cons x rs);;
+
+fromTo : Int -> + Int -> + IList;;
+fromTo a b =
+    if +a < b then
+        Cons a (fromTo (a + 1) b)
+    else
+        Nil;;
+
+main : IList;;
+main = reverse (fromTo 1 100) Nil;;
+

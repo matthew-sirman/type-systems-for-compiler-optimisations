@@ -1,0 +1,24 @@
+import Data.Bool;;
+import Numeric;;
+
+range : Int -> + Int -> + [Int];;
+range a b =
+    if +a < b
+        then a :: range (a + 1) b
+        else [];;
+
+all : (a -o Bool) -> [a] ->? Bool;;
+all p xs =
+    case ?xs of
+        [] -> True;
+        (x::xs) ->
+            if !p x
+                then all p xs
+                else False;;
+
+checkPrime : Int -> Bool;;
+checkPrime n = all (\m -o (n % m) != 0) (range 2 n);;
+
+main : Bool;;
+main = checkPrime 9797;;
+

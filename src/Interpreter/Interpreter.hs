@@ -1,6 +1,8 @@
 {-# LANGUAGE TemplateHaskell, RankNTypes #-}
 module Interpreter.Interpreter where
 
+-- Interpreter for executing STFL bytecode
+
 import IR.Instructions (BinaryOperator(..), Immediate(..))
 
 import Compiler.Bytecode
@@ -17,9 +19,6 @@ import Data.Word
 import Data.Bits
 
 import Text.Printf
-
--- TODO: Remove
-import Debug.Trace
 
 data ProgramStats = ProgramStats
     { _staticMemoryAllocation :: Word64
@@ -44,12 +43,12 @@ instance Show ProgramStats where
         "Writes executed: " ++ show (stats ^. writesExecuted) ++ "\n"
 
 showStatsCsv :: ProgramStats -> String
-showStatsCsv stats = show (stats ^. staticMemoryAllocation) ++ ", " ++
-                     show (stats ^. dynamicMemoryAllocation) ++ ", " ++
-                     show (stats ^. reclaimedMemory) ++ ", " ++
-                     show (stats ^. maximumMemory) ++ ", " ++
-                     show (stats ^. instructionsExecuted) ++ ", " ++
-                     show (stats ^. readsExecuted) ++ ", " ++
+showStatsCsv stats = show (stats ^. staticMemoryAllocation) ++ "," ++
+                     show (stats ^. dynamicMemoryAllocation) ++ "," ++
+                     show (stats ^. reclaimedMemory) ++ "," ++
+                     show (stats ^. maximumMemory) ++ "," ++
+                     show (stats ^. instructionsExecuted) ++ "," ++
+                     show (stats ^. readsExecuted) ++ "," ++
                      show (stats ^. writesExecuted)
 
 updateMaxMemory :: ProgramStats -> ProgramStats
@@ -127,9 +126,6 @@ interpret settings bytecode = do
               putStrLn ""
               print (endState ^. programStats)
           when (settings ^. outputCsv) $ putStrLn (showStatsCsv (endState ^. programStats))
-          --     putStrLn ""
-          --     putStrLn "Result:"
-          -- print (endState ^. returnVal)
       Left code -> putStrLn $ "Exception thrown: " ++ show code
       Right _ -> putStrLn "The impossible happened: the program exited without a status."
 
@@ -252,6 +248,8 @@ stepBin Mul res v1 v2 = do
     storeVal res (v1 * v2)
 stepBin Div res v1 v2 = do
     storeVal res (v1 `div` v2)
+stepBin Mod res v1 v2 = do
+    storeVal res (v1 `mod` v2)
 stepBin And res v1 v2 = do
     storeVal res (v1 .&. v2)
 stepBin Or res v1 v2 = do
@@ -268,24 +266,30 @@ stepBin NotEqual res v1 v2 = do
        else storeVal res 0
 stepBin LessThan res v1 v2 = do
     if v1 < v2
-       then storeVal res 0
-       else storeVal res 1
+       then storeVal res 1
+       else storeVal res 0
 stepBin GreaterThan res v1 v2 = do
     if v1 > v2
-       then storeVal res 0
-       else storeVal res 1
+       then storeVal res 1
+       else storeVal res 0
 stepBin LessThanEqual res v1 v2 = do
     if v1 <= v2
-       then storeVal res 0
-       else storeVal res 1
+       then storeVal res 1
+       else storeVal res 0
 stepBin GreaterThanEqual res v1 v2 = do
     if v1 >= v2
-       then storeVal res 0
-       else storeVal res 1
+       then storeVal res 1
+       else storeVal res 0
+stepBin Compare res v1 v2 = do
+    case compare v1 v2 of
+      EQ -> storeVal res 0
+      LT -> storeVal res 1
+      GT -> storeVal res 2
 
 loadVal :: BytecodeValue Word64 -> Interpreter Word64
 loadVal (Immediate imm) = readImm imm
     where
+        -- Some cases are ignored for proof-of-concept purposes
         readImm :: Immediate -> Interpreter Word64
         readImm (Int64 i) = pure (fromIntegral i)
         readImm (Real64 r) = undefined
@@ -310,10 +314,4 @@ wordToBytes wd = [fromIntegral (shift wd ((-8) * i) .&. 255) | i <- [0..7]]
 
 bytesToWord :: [Word8] -> Word64
 bytesToWord wds = sum (zipWith (\i wd -> shift (fromIntegral wd) (8 * i)) [0..] wds)
-
-testInterpreter :: String -> IO ()
-testInterpreter input = do
-    let bc = testEverything3 input
-    putStrLn "Running..."
-    interpret debugMode bc
 

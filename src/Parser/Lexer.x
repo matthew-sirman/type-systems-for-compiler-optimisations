@@ -22,6 +22,8 @@ $alpha = [a-zA-Z]
 tokens :-
     $white+                             ;
     "--".*                              ;
+    import                              { directive DImport }
+    "."                                 { directive DDot }
     let                                 { keyword KWlet }
     and                                 { keyword KWand }
     in                                  { keyword KWin }
@@ -64,7 +66,7 @@ tokens :-
     ";"                                 { symbol TokSemiColon }
     "\"                                 { symbol TokBackslash }
 
-    [= \! \< \> \+ \- \* \/ \$ \.]+\#?  { identifier TokInfixId }
+    [=\!\<\>\+\-\*\/\$\.\%\|\&]+\#?     { identifier TokInfixId }
     [a-z \_] [$alpha $digit \_ \']*\#?  { identifier TokLowerId }
     [A-Z] [$alpha $digit \_ \']*\#?     { identifier TokUpperId }
     "@" [a-z \_] [$alpha $digit \_ \']* { identifier TokMultiplicityId }
@@ -76,7 +78,9 @@ tokens :-
 {
 
 data Token
-    = KWlet                         -- let
+    = DImport                       -- import
+    | DDot                          -- .
+    | KWlet                         -- let
     | KWand                         -- and
     | KWin                          -- in
     | KWcase                        -- case
@@ -130,7 +134,8 @@ data Token
 
     | TokEOF deriving Show
 
-keyword, symbol :: Token -> AlexInput -> Int -> Alex (Loc Token)
+directive, keyword, symbol :: Token -> AlexInput -> Int -> Alex (Loc Token)
+directive t ((AlexPn start line _), _, _, _) len = pure (L (SL start (start + len) line) t)
 keyword t ((AlexPn start line _), _, _, _) len = pure (L (SL start (start + len) line) t)
 symbol = keyword
 

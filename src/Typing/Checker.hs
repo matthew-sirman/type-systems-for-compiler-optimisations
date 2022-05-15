@@ -8,7 +8,6 @@ import qualified Util.Stream as Stream
 import qualified Util.ConstrainedPoset as P
 
 import qualified Builtin.Builtin as B
-import qualified Builtin.Types as B
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -19,12 +18,6 @@ import Data.Maybe (isNothing)
 import Data.Functor (($>))
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
-
--- TODO: REMOVE
-import qualified Data.DisjointSet as DS
-import Debug.Trace
-
--- type RemapperState a = StateT (M.HashMap Identifier TypeVar) CheckerState a
 
 typecheck :: StaticContext -> Loc ValExpr -> Either (TypeError, TypeVarMap) (TypedExpr, MultiplicityPoset)
 typecheck staticCtx expr = runReader (evalStateT (runExceptT checker) emptyCheckState) staticCtx
@@ -152,7 +145,7 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
     -- this newly unified type onto the next branch.
     initialBranchType <- freshPolyType
     (branchVSets, branches) <- NE.unzip <$> mapM (compareBranches caseMul (typeof typedDisc) initialBranchType) branches
-    modify (varFrame .~ foldl foldVSets vSets branchVSets)
+    modify (varFrame .~ foldl foldVSets (CheckVarFrame S.empty S.empty S.empty) branchVSets)
     branchType <- typeRepresentative initialBranchType
     pure (Case branchType caseMul typedDisc branches)
     where
@@ -169,7 +162,7 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
             popVarFrame
             -- Now we unify our updated view of the previously expected branch type with the newly
             -- inferred branch type.
-            unifyLUB True (location branch) branchType (typeof typedBranch)
+            unify (location branch) branchType (typeof typedBranch)
 
             pure (branchVSets, typedBranch)
 
@@ -215,8 +208,8 @@ typecheck' ctx (L _ (VECase mul disc branches)) = do
         -- says we cannot use it. But this is exactly the property we want for linear variables.
         foldVSets :: CheckVarFrame -> CheckVarFrame -> CheckVarFrame
         foldVSets a =   (affineVars %~ S.intersection (a ^. affineVars))
-                      . (relevantVars %~ S.intersection (a ^. relevantVars))
-                      . (zeroVars %~ S.intersection (a ^. zeroVars))
+                      . (relevantVars %~ S.union (a ^. relevantVars))
+                      . (zeroVars %~ S.union (a ^. zeroVars))
 
 typecheck' ctx (L _ (VEApp fun arg)) = do
     typedFun <- typecheck' ctx fun 
@@ -266,29 +259,8 @@ typecheckLiteral ctx (ListLiteral es) = do
 
         constructList :: Type -> [TypedExpr] -> TypedExpr
         constructList t [] = Variable t (I "[]")
-        -- constructList t (x:xs) = Application t x (constructList t xs)
 
 typecheckLiteral ctx (TupleLiteral exprs) = do
     typedExprs <- mapM (typecheck' ctx) exprs
     pure (Tuple (TupleType (map typeof typedExprs)) typedExprs)
-
-testEverything :: String -> IO ()
-testEverything s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
-                     Left (e, tvm) -> putStrLn (showError s tvm e)
-                     Right (t, _) -> putStrLn (showType M.empty (typeof t))
-    where
-        fromRight (Right x) = x
-
-typeCheckExpr :: String -> (TypedExpr, MultiplicityPoset)
-typeCheckExpr s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
-                     Right (t, p) -> (t, p)
-    where
-        fromRight (Right x) = x
-
-testTypeCheck :: String -> IO ()
-testTypeCheck s = case typecheck B.defaultBuiltins (fromRight (test_parseExpr s)) of
-                     Left (e, tvm) -> putStrLn (showError s tvm e)
-                     Right (t, _) -> print t
-    where
-        fromRight (Right x) = x
 

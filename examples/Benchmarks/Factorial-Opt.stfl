@@ -1,14 +1,10 @@
-(-) : Int -o Int -o Int;;
-(MkInt# x) - (MkInt# y) = MkInt# (x -# y);;
+import Numeric;;
 
-(*) : Int -o Int -o Int;;
-(MkInt# x) * (MkInt# y) = MkInt# (x *# y);;
-
-fact_r : Int -> + Int;;
-fact_r n = case +n of
+fact : Int -> + Int;;
+fact n = case +n of
     0 -> 1;
-    n -> n * fact_r (n - 1);;
+    n -> n * fact (n - 1);;
 
 main : Int;;
-main = fact_r 20;;
+main = fact 100;;
 

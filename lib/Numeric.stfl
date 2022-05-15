@@ -1,0 +1,23 @@
+---------------------
+-- Numeric library --
+---------------------
+--
+-- Contains basic functions for use on numbers including
+--  - arithmetic
+--
+
+(+) : Int -o Int -o Int;;
+(MkInt# x) + (MkInt# y) = MkInt# (x +# y);;
+
+(-) : Int -o Int -o Int;;
+(MkInt# x) - (MkInt# y) = MkInt# (x -# y);;
+
+(*) : Int -o Int -o Int;;
+(MkInt# x) * (MkInt# y) = MkInt# (x *# y);;
+
+(/) : Int -o Int -o Int;;
+(MkInt# x) / (MkInt# y) = MkInt# (x /# y);;
+
+(%) : Int -o Int -o Int;;
+(MkInt# x) % (MkInt# y) = MkInt# (x %# y);;
+
